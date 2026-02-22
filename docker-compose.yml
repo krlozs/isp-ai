@@ -45,7 +45,7 @@ services:
       context: ./app
       dockerfile: Dockerfile
     restart: always
-    command: celery -A app.main worker --loglevel=info --concurrency=2
+    command: celery -A main worker --loglevel=info --concurrency=2
     environment:
       GLM_API_KEY: ${GLM_API_KEY}
       MIKROWISP_API_URL: ${MIKROWISP_API_URL}
