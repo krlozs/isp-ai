@@ -36,7 +36,7 @@ services:
         condition: service_healthy
     networks:
       - isp-network
-      - easypanel-network
+      - easypanel_default
     volumes:
       - media-files:/app/media
 
@@ -112,5 +112,5 @@ volumes:
 networks:
   isp-network:
     driver: bridge
-  easypanel-network:
+  easypanel_default:
     external: true
