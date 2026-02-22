@@ -25,12 +25,12 @@ from datetime import datetime
 from typing import Optional
 
 import httpx
-from celery import Celery
 import redis.asyncio as aioredis
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
+from celery import Celery
 from zhipuai import ZhipuAI
 
 from prompts import (
