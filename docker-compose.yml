@@ -23,7 +23,7 @@ services:
       WHATSAPP_PHONE_ID_TECNICOS: ${WHATSAPP_PHONE_ID_TECNICOS}
       WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN}
       TECNICO_WHATSAPP_NUMBER: ${TECNICO_WHATSAPP_NUMBER}
-      DATABASE_URL: postgresql://isp_user:${POSTGRES_PASSWORD}@db:5432/isp_ai_db
+      DATABASE_URL: postgresql://isp_user:Telecom2026@db:5432/isp_ai_db
       REDIS_URL: redis://redis:6379/0
       ISP_NOMBRE: ${ISP_NOMBRE}
       HORARIO_TECNICO: ${HORARIO_TECNICO}
@@ -56,7 +56,7 @@ services:
       WHATSAPP_PHONE_ID_CLIENTES: ${WHATSAPP_PHONE_ID_CLIENTES}
       WHATSAPP_PHONE_ID_TECNICOS: ${WHATSAPP_PHONE_ID_TECNICOS}
       TECNICO_WHATSAPP_NUMBER: ${TECNICO_WHATSAPP_NUMBER}
-      DATABASE_URL: postgresql://isp_user:${POSTGRES_PASSWORD}@db:5432/isp_ai_db
+      DATABASE_URL: postgresql://isp_user:Telecom2026@db:5432/isp_ai_db
       REDIS_URL: redis://redis:6379/0
     depends_on:
       - app
