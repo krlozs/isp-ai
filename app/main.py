@@ -66,6 +66,15 @@ VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
 
 TECNICO_WHATSAPP = os.getenv("TECNICO_WHATSAPP_NUMBER")  # ej: 573001234567
 
+# ─────────────────────────────────────────────
+# CONFIGURACIÓN CELERY  <--- PEGA EL CÓDIGO AQUÍ
+# ─────────────────────────────────────────────
+
+celery_app = Celery(
+    "main",
+    broker=os.getenv("CELERY_BROKER_URL", "redis://redis:6379/0"),
+    backend=os.getenv("CELERY_RESULT_BACKEND", "redis://redis:6379/0")
+)
 
 # ─────────────────────────────────────────────
 # STARTUP / SHUTDOWN
