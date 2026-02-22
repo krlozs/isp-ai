@@ -1,0 +1,113 @@
+# =============================================================
+#  ISP AI SUPPORT SYSTEM — Docker Compose para EasyPanel
+#  Servicios: FastAPI · PostgreSQL · Redis · Celery
+#  v3.1 — Optimizado para EasyPanel
+# =============================================================
+
+services:
+
+  # ── APLICACIÓN PRINCIPAL (FastAPI) ─────────────────────────
+  app:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      GLM_API_KEY: ${GLM_API_KEY}
+      MIKROWISP_API_URL: ${MIKROWISP_API_URL}
+      MIKROWISP_API_TOKEN: ${MIKROWISP_API_TOKEN}
+      SMARTOLT_API_URL: ${SMARTOLT_API_URL}
+      SMARTOLT_API_KEY: ${SMARTOLT_API_KEY}
+      WHATSAPP_TOKEN: ${WHATSAPP_TOKEN}
+      WHATSAPP_PHONE_ID_CLIENTES: ${WHATSAPP_PHONE_ID_CLIENTES}
+      WHATSAPP_PHONE_ID_TECNICOS: ${WHATSAPP_PHONE_ID_TECNICOS}
+      WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN}
+      TECNICO_WHATSAPP_NUMBER: ${TECNICO_WHATSAPP_NUMBER}
+      DATABASE_URL: postgresql://isp_user:${POSTGRES_PASSWORD}@db:5432/isp_ai_db
+      REDIS_URL: redis://redis:6379/0
+      ISP_NOMBRE: ${ISP_NOMBRE}
+      HORARIO_TECNICO: ${HORARIO_TECNICO}
+      NUMERO_PAGOS: ${NUMERO_PAGOS}
+      ENVIRONMENT: production
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - isp-network
+    volumes:
+      - media-files:/app/media
+
+  # ── CELERY WORKER (Tareas en background) ───────────────────
+  celery:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    restart: always
+    command: celery -A tasks worker --loglevel=info --concurrency=2
+    environment:
+      GLM_API_KEY: ${GLM_API_KEY}
+      MIKROWISP_API_URL: ${MIKROWISP_API_URL}
+      MIKROWISP_API_TOKEN: ${MIKROWISP_API_TOKEN}
+      SMARTOLT_API_URL: ${SMARTOLT_API_URL}
+      SMARTOLT_API_KEY: ${SMARTOLT_API_KEY}
+      WHATSAPP_TOKEN: ${WHATSAPP_TOKEN}
+      WHATSAPP_PHONE_ID_CLIENTES: ${WHATSAPP_PHONE_ID_CLIENTES}
+      WHATSAPP_PHONE_ID_TECNICOS: ${WHATSAPP_PHONE_ID_TECNICOS}
+      TECNICO_WHATSAPP_NUMBER: ${TECNICO_WHATSAPP_NUMBER}
+      DATABASE_URL: postgresql://isp_user:${POSTGRES_PASSWORD}@db:5432/isp_ai_db
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - app
+      - redis
+      - db
+    networks:
+      - isp-network
+    volumes:
+      - media-files:/app/media
+
+  # ── POSTGRESQL ──────────────────────────────────────────────
+  db:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_DB: isp_ai_db
+      POSTGRES_USER: isp_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./app/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U isp_user -d isp_ai_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - isp-network
+
+  # ── REDIS ───────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: always
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - isp-network
+
+# ── VOLUMES ─────────────────────────────────────────────────
+volumes:
+  postgres-data:
+  redis-data:
+  media-files:
+
+# ── NETWORKS ────────────────────────────────────────────────
+networks:
+  isp-network:
+    driver: bridge
