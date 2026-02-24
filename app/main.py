@@ -518,25 +518,36 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
         session.contrato = contrato
         session.nombre = cliente.get("nombre")
 
-        # --- NUEVA LÓGICA PARA PLAN Y SERIAL ---
-        # Accedemos a la lista de servicios y extraemos los datos anidados
+        # --- NUEVA LÓGICA PARA MÚLTIPLES SERVICIOS ---
         servicios = cliente.get("servicios", [])
-        if servicios:
-            # 1. Extraer el Plan del primer servicio encontrado
-            session.plan = servicios[0].get("perfil", "N/A")
+        
+        # Lista para armar el texto que leerá la IA
+        lista_planes_detalle = []
+        serial_encontrado = None
+        import re # Importamos regex una sola vez fuera del loop
+
+        # Recorremos todos los servicios del cliente
+        for serv in servicios:
+            tipo = serv.get("tiposervicio", "General")
+            nombre_plan = serv.get("perfil", "Sin Plan")
+            estado = serv.get("status_user", "Desconocido")
             
-            # 2. Extraer el Serial ONT del campo 'smartolt' (que es un texto raro de PHP)
-            smartolt_data = servicios[0].get("smartolt", "")
-            import re # Importamos regex para buscar el patrón del serial
-            # Buscamos el patrón s:2:"sn";s:TAMANO:"VALOR"
-            match = re.search(r's:2:"sn";s:\d+:"([^"]+)"', smartolt_data)
-            if match:
-                session.serial_ont = match.group(1) # Extraemos el valor capturado
-            else:
-                session.serial_ont = None
-        else:
-            session.plan = "N/A"
-            session.serial_ont = None
+            # Agregamos el detalle a la lista (ej: "internet: Mi Inter 100 (Estado: ONLINE)")
+            lista_planes_detalle.append(f"- {tipo}: {nombre_plan} (Estado: {estado})")
+
+            # Buscamos el Serial ONT (Solo si no hemos encontrado uno todavía)
+            # Asumimos que el primer servicio con datos de smartolt es el principal (Internet)
+            if not serial_encontrado:
+                smartolt_data = serv.get("smartolt", "")
+                match = re.search(r's:2:"sn";s:\d+:"([^"]+)"', smartolt_data)
+                if match:
+                    serial_encontrado = match.group(1)
+
+        # Guardamos la lista completa como un string separado por saltos de línea
+        session.plan = "\n".join(lista_planes_detalle) if lista_planes_detalle else "N/A"
+        
+        # Guardamos el serial encontrado
+        session.serial_ont = serial_encontrado
         # ---------------------------------------
 
         # Verificar estado de cuenta
@@ -546,7 +557,7 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
 
         prompt = PROMPT_CLIENTE_IDENTIFICADO.format(
             nombre=session.nombre,
-            plan=session.plan,  # <--- IMPORTANTE: Cambiado de cliente.get("plan") a session.plan
+            plan=session.plan, # Ahora la IA verá todos los servicios aquí
             estado_servicio=cliente.get("estado", "activo"),
             saldo=f"${saldo:,.0f}" if saldo > 0 else "$0",
             ultimo_ticket=cliente.get("ultimo_ticket", "Ninguno"),
