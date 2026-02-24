@@ -187,6 +187,9 @@ async def call_glm(
             temperature=temperatura,
             max_tokens=500
         )
+
+        # Agregamos este log temporal para ver qué está llegando
+        logger.info(f"DEBUG Z.AI Response: {response.model_dump_json()}")
         
         reply = response.choices[0].message.content
 
