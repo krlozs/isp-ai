@@ -32,12 +32,23 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 from celery import Celery
 from zhipuai import ZhipuAI
+from openai import AsyncOpenAI
 
 from prompts import (
     SYSTEM_PROMPT, PROMPT_SALUDO, PROMPT_CLIENTE_IDENTIFICADO,
     PROMPT_DIAGNOSTICO_RED, PROMPT_POST_REBOOT, PROMPT_TROUBLESHOOTING,
     PROMPT_ESCALADO_TECNICO, PROMPT_CSAT, PROMPT_CLIENTE_FRUSTRADO,
     PROMPT_FUERA_HORARIO, MENSAJE_TECNICO_WHATSAPP, ISP_CONFIG
+)
+
+# ─────────────────────────────────────────────
+# CONFIGURACIÓN CLIENTE IA (Z.AI CODING PLAN)
+# ─────────────────────────────────────────────
+
+glm_client = AsyncOpenAI(
+    api_key=os.getenv("GLM_API_KEY"),
+    # Endpoint ESPECÍFICO para Coding Tools según soporte
+    base_url="https://api.z.ai/api/coding/paas/v4" 
 )
 
 # ─────────────────────────────────────────────
@@ -52,7 +63,6 @@ app = FastAPI(title="ISP AI Support System", version="1.0.0")
 
 # Clientes de servicios externos
 # glm_client = ZhipuAI(api_key=os.getenv("GLM_API_KEY"))
-ZAI_API_URL = os.getenv("ZAI_API_URL", "https://api.z.ai/api/paas/v4/chat/completions")
 GLM_API_KEY = os.getenv("GLM_API_KEY")
 redis_client: aioredis.Redis = None
 
@@ -153,7 +163,7 @@ async def clear_session(phone: str):
 
 
 # ─────────────────────────────────────────────
-# INTEGRACIÓN: GLM (via Z.AI API / httpx)
+# INTEGRACIÓN: GLM (Vía OpenAI Compatible / Z.AI)
 # ─────────────────────────────────────────────
 
 async def call_glm(
@@ -162,50 +172,32 @@ async def call_glm(
     temperatura: float = 0.7
 ) -> str:
     """
-    Llama a Z.AI (Internacional) usando httpx directamente.
-    Esto evita el problema de la librería zhipuai que apunta a China.
+    Llama a Z.AI Coding Plan usando OpenAI Client.
     """
     system = SYSTEM_PROMPT.format(**ISP_CONFIG)
 
-    # Construir mensajes con historial
     messages = [{"role": "system", "content": system}]
     messages.extend(session.historial[-10:])
     messages.append({"role": "user", "content": prompt})
 
-    headers = {
-        "Authorization": f"Bearer {GLM_API_KEY}",
-        "Content-Type": "application/json"
-    }
-
-    payload = {
-        "model": "glm-4.7",  # Modelo actual de Z.AI según tu curl
-        "messages": messages,
-        "temperature": temperatura,
-        "max_tokens": 500
-    }
-
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(ZAI_API_URL, json=payload, headers=headers)
-            
-            if response.status_code == 200:
-                data = response.json()
-                # La estructura de respuesta es estándar (tipo OpenAI)
-                reply = data["choices"][0]["message"]["content"]
+        response = await glm_client.chat.completions.create(
+            model="GLM-4.7",  # Modelo permitido en Coding Plan
+            messages=messages,
+            temperature=temperatura,
+            max_tokens=500
+        )
+        
+        reply = response.choices[0].message.content
 
-                # Actualizar historial
-                session.historial.append({"role": "user", "content": prompt})
-                session.historial.append({"role": "assistant", "content": reply})
+        session.historial.append({"role": "user", "content": prompt})
+        session.historial.append({"role": "assistant", "content": reply})
 
-                return reply
-            else:
-                logger.error(f"Error Z.AI API: {response.status_code} - {response.text}")
-                return "Disculpa, tuve un problema al contactar la IA (Z.AI)."
+        return reply
 
     except Exception as e:
-        logger.error(f"Error GLM (Z.AI): {e}")
-        return "Disculpa, ocurrió un error de conexión con el servicio de IA."
-
+        logger.error(f"Error Z.AI Coding Plan: {e}")
+        return "Disculpa, tuve un problema al procesar tu solicitud (IA Coding)."
 
 # ─────────────────────────────────────────────
 # INTEGRACIÓN: MIKROWISP API
