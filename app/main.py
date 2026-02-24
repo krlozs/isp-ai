@@ -169,45 +169,42 @@ async def clear_session(phone: str):
 async def call_glm(
     prompt: str,
     session: SessionState,
+    raw_user_message: str,  # <--- NUEVO PARÁMETRO: El texto real que escribió el usuario
     temperatura: float = 0.7
 ) -> str:
     """
-    Llama a Z.AI Coding Plan usando OpenAI Client.
+    Llama a Z.AI (OpenAI Compatible / Z.AI).
+    Separa el historial real de los prompts técnicos.
     """
     system = SYSTEM_PROMPT.format(**ISP_CONFIG)
 
+    # 1. Construimos los mensajes para la API
     messages = [{"role": "system", "content": system}]
+    # Agregamos el historial REAL (solo lo que se dijo antes)
     messages.extend(session.historial[-10:])
+    # Agregamos el PROMPT ACTUAL (instrucciones técnicas) solo para esta petición
     messages.append({"role": "user", "content": prompt})
 
     try:
         response = await glm_client.chat.completions.create(
-            model="GLM-4.5-Air",  # Modelo permitido en Coding Plan
+            model="GLM-4.5-Air",
             messages=messages,
             temperature=temperatura,
             max_tokens=2000
         )
-
-        # Agregamos este log temporal para ver qué está llegando
-        logger.info(f"DEBUG Z.AI Response: {response.model_dump_json()}")
-        
         reply = response.choices[0].message.content
 
-        # --- AGREGA ESTA VALIDACIÓN ---
-        # Si la IA devuelve vacío, None o solo espacios, usamos un mensaje por defecto
-        if not reply or reply.strip() == "":
-            logger.warning("La IA devolvió una respuesta vacía, usando fallback.")
-            reply = "Lo siento, no pude generar una respuesta en este momento."
-        # -------------------------------
-
-        session.historial.append({"role": "user", "content": prompt})
+        # 2. ACTUALIZACIÓN DEL HISTORIAL (CRÍTICO)
+        # Guardamos SOLO la conversación humana real.
+        # NO guardamos el 'prompt' técnico.
+        session.historial.append({"role": "user", "content": raw_user_message})
         session.historial.append({"role": "assistant", "content": reply})
 
         return reply
 
     except Exception as e:
-        logger.error(f"Error Z.AI Coding Plan: {e}")
-        return "Disculpa, tuve un problema al procesar tu solicitud (IA Coding)."
+        logger.error(f"Error GLM: {e}")
+        return "Disculpa, tuve un problema al procesar tu solicitud."
 
 # ─────────────────────────────────────────────
 # INTEGRACIÓN: MIKROWISP API
@@ -497,7 +494,7 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
         if not session.historial:
             # Primer mensaje → saludo
             prompt = PROMPT_SALUDO.format(mensaje_cliente=mensaje)
-            reply = await call_glm(prompt, session)
+            reply = await call_glm(prompt, session, mensaje)
             await save_session(session)
             await wa_send_message(phone, reply)
             return
@@ -570,7 +567,7 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
             fecha_vencimiento=cliente.get("fecha_vencimiento", "N/A"),
             estado_cuenta=estado_cuenta
         )
-        reply = await call_glm(prompt, session)
+        reply = await call_glm(prompt, session, mensaje)
 
         if estado_cuenta == "CORTADO_MORA":
             session.fase = "FINALIZADO_MORA"
@@ -609,7 +606,7 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
             tipo_falla=tipo_falla,
             problema_cliente=mensaje
         )
-        reply = await call_glm(prompt, session)
+        reply = await call_glm(prompt, session, mensaje)
 
         if tipo_falla == "MASIVO":
             session.fase = "FINALIZADO_MASIVO"
@@ -636,7 +633,7 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
                 respuesta_cliente=mensaje
             )
 
-        reply = await call_glm(prompt, session)
+        reply = await call_glm(prompt, session, mensaje)
 
         # Detectar si el LLM decidió escalar
         if necesita_escalado(reply):
@@ -678,7 +675,7 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
             horario_preferido=horario,
             numero_ticket=ticket_id or "Pendiente"
         )
-        reply = await call_glm(prompt, session)
+        reply = await call_glm(prompt, session, mensaje)
 
         # Notificar al técnico
         if ticket_id:
@@ -722,7 +719,7 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
             tipo_resolucion="REMOTA",
             tiempo_resolucion="Pocos minutos"
         )
-        reply = await call_glm(prompt, session)
+        reply = await call_glm(prompt, session, mensaje)
         await wa_send_buttons(phone, reply, [
             {"id": "csat_1", "title": "1️⃣ Muy malo"},
             {"id": "csat_3", "title": "3️⃣ Regular"},
@@ -773,7 +770,7 @@ async def ejecutar_reboot_y_verificar(phone: str, serial: str, session: SessionS
         estado_ont_post=estado_post,
         señal_post=señal_val or "N/A"
     )
-    reply = await call_glm(prompt, session)
+    reply = await call_glm(prompt, session, mensaje)
 
     if estado_post == "online" and señal_ok:
         session.fase = "CSAT"
@@ -910,7 +907,7 @@ async def ticket_cerrado_por_tecnico(request: Request):
                 tipo_resolucion="VISITA_TECNICA",
                 tiempo_resolucion="Visita técnica completada"
             )
-            reply = await call_glm(prompt, session)
+            reply = await call_glm(prompt, session, mensaje)
             await wa_send_message(cliente_phone, reply)
 
         return JSONResponse({"status": "ok"})
