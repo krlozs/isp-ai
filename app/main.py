@@ -520,7 +520,7 @@ async def wa_send_list(to: str, header: str, body_text: str, sections: list, but
         rows = []
         for row in sec.get("rows", []):
             rows.append({
-                "id": row["id"],      # Este ID es lo que llegará al webhook (ej: kpi_lento)
+                "id": row["id"],
                 "title": row["title"],
                 "description": row.get("description", "")
             })
@@ -663,7 +663,7 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
         await wa_send_message(phone, reply)
         return
 
-    # ── FASE: DIAGNÓSTICO DE RED ─────────────
+        # ── FASE: DIAGNÓSTICO DE RED (Híbrido) ─────────
     elif session.fase == "DIAGNOSTICO_RED":
 
         ont_status = None
@@ -678,42 +678,37 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
             if olt_id:
                 alarmas = await so_get_alarmas(olt_id)
 
+        # Cálculo del tipo de falla
         clientes_afectados = len([a for a in alarmas if a.get("severity") in ("critical", "major")])
         tipo_falla = "MASIVO" if clientes_afectados > 3 else ("INDIVIDUAL" if ont_status and ont_status.get("status") == "offline" else "NINGUNO")
 
-        prompt = PROMPT_DIAGNOSTICO_RED.format(
-            serial_ont=session.serial_ont or "N/A",
-            estado_ont=ont_status.get("status", "desconocido") if ont_status else "no_encontrado",
-            señal_dbm=señal or "N/A",
-            ultima_vez_online=ont_status.get("last_seen", "N/A") if ont_status else "N/A",
-            alarmas_nodo=len(alarmas),
-            clientes_afectados=clientes_afectados,
-            tipo_falla=tipo_falla,
-            problema_cliente=mensaje
-        )
-        reply = await call_glm(prompt, session, mensaje)
-
+        # --- ESCENARIO A: CORTE MASIVO (Automático) ---
         if tipo_falla == "MASIVO":
+            prompt = PROMPT_DIAGNOSTICO_RED.format(...) # Texto informativo
+            reply = await call_glm(prompt, session, mensaje)
             session.fase = "FINALIZADO_MASIVO"
+            await wa_send_message(phone, reply)
+            return
+
+        # --- ESCENARIO B: FALLA INDIVIDUAL / OFFLINE (Automático) ---
         elif tipo_falla == "INDIVIDUAL" and session.serial_ont:
-            # Intentar reinicio remoto
+            # Aquí está tu lógica de REINICIO AUTOMÁTICO. NO LA BORRES.
             session.fase = "REBOOT_PENDIENTE"
             bg.add_task(ejecutar_reboot_y_verificar, phone, session.serial_ont, session)
-        else:
+            
+            prompt = PROMPT_DIAGNOSTICO_RED.format(...) # Texto avisando el reboot
+            reply = await call_glm(prompt, session, mensaje)
+            await wa_send_message(phone, reply)
+            return
+
+        # --- ESCENARIO C: ONT ONLINE, SEÑAL NORMAL (AQUÍ VA EL MENÚ) ---
+        elif tipo_falla == "NINGUNO":
+            # El equipo está bien, pero el usuario queja. Enviar el Menú KPI en lugar de preguntar.
+            
             session.fase = "TROUBLESHOOTING"
+            session.pasos_realizados = [] 
 
-        await save_session(session)
-        await wa_send_message(phone, reply)
-        return
-
-    # ── FASE: TROUBLESHOOTING (Modo Lista Forzada) ─────────
-    elif session.fase == "TROUBLESHOOTING":
-
-        # 1. CONTROL DE "BARRERA": Si el menú no se ha mostrado, NO pasamos a la IA.
-        # Verificamos si "menu_desplegado" está en la lista de pasos.
-        if "menu_desplegado" not in session.pasos_realizados:
-
-            # Definimos la lista (KPIs)
+            # Definir la lista de opciones
             secciones_menu = [
                 {
                     "title": "📉 Problemas de Velocidad",
@@ -740,49 +735,69 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
                 }
             ]
 
-            # Enviar la lista
+            # Enviar Lista y DETENER
             await wa_send_list(
                 phone, 
                 header_text="Diagnóstico de Fallas", 
-                body_text="Selecciona la opción que describe mejor tu problema:", 
+                body_text="He revisado tu conexión y parece estar técnica y operativamente bien. Selecciona el problema que experimentas para guiarte:", 
                 sections=secciones_menu, 
                 button_text="Seleccionar Problema"
             )
 
-            # MARCAR COMO DESPLEGADO
             session.pasos_realizados.append("menu_desplegado")
             await save_session(session)
-            
-            # CRUCIAL: Usamos 'return' para detener la ejecución aquí.
-            # Esto evita que el código siga hacia abajo y ejecute la IA (que es lo que causaba tu problema).
             return
 
-        # 2. PROCESAR SELECCIÓN (Si el menú ya se mostró)
-        
-        # Si el mensaje empieza con "kpi_" es que seleccionó algo de la lista
+    # ── FASE: TROUBLESHOOTING (Ejecución de KPIs) ─────────
+    elif session.fase == "TROUBLESHOOTING":
+
+        # 1. PROCESAR SELECCIÓN DE LISTA (KPI)
+        # Si el mensaje es un ID de la lista (ej: kpi_lento_todo)
         if mensaje.startswith("kpi_"):
-            logger.info(f"KPI SELECCIONADO: {mensaje}")
             
+            # --- LÓGICA PREDEFINIDA (HARDCODED) PARA KPIs ---
             if mensaje == "kpi_no_internet":
-                reply = "Entendido, reportas 'No tengo internet'. Voy a revisar tu línea ahora."
+                reply = "Entendido, reportas 'No tengo internet'. Voy a verificar el estado de tu línea nuevamente."
+                # Aquí podrías llamar a tus funciones de diagnóstico si necesitas más datos
+                # await so_get_ont_status(...)
+            
             elif mensaje == "kpi_lento_todo":
-                reply = "Entendido, todo lento. Voy a verificar la red."
+                reply = "Entendido, todo es lento. Voy a revisar si hay congestión en el nodo OLT."
+            
             elif mensaje == "kpi_wifi_lento":
-                reply = "Problema de WiFi detectado. Vamos a reiniciarlo."
+                reply = "Problema de WiFi detectado. Te recomiendo reiniciar tu router o cambiar el canal a 1, 6 u 11."
+            
+            elif mensaje == "kpi_wifi_no_aparece":
+                reply = "Vamos a reiniciar el módulo WiFi de tu equipo. ¿Te gustaría que lo haga ahora?"
+            
+            elif mensaje == "kpi_lag":
+                reply = "El lag en juegos suele ser por estabilidad de WiFi. Intenta conectar con cable de red."
+
+            elif mensaje == "kpi_intermitente":
+                reply = "La conexión se corta indica posible inestabilidad en la fibra o el equipo. Voy a revisar su histórico."
+
             elif mensaje == "kpi_tecnico":
+                # ESCALADO
                 session.fase = "ESCALADO"
-                reply = "Generando ticket para visita técnica."
-            else:
-                reply = "Opción recibida. Procesando..."
-
+                reply = "Entendido. Generando ticket de visita técnica para usted. Un técnico se contactará pronto."
+                # Aquí iría tu lógica de creación de ticket mw_crear_ticket(...)
+            
+            # Enviamos la respuesta predefinida
             await wa_send_message(phone, reply)
-            return
+            return # Terminamos el flujo aquí
 
-        # 3. SI EL USUARIO ESCRIBE TEXTO EN LUGAR DE SELECCIONAR
-        # Si escribió "Lentitud" en lugar de tocar el botón:
-        reply = "Por favor, selecciona una opción de la lista anterior para que pueda ayudarte mejor."
-        await wa_send_message(phone, reply)
-        return
+        # 2. SI EL USUARIO ESCRIBE TEXTO EN VEZ DE SELECCIONAR
+        # Si el usuario escribe "Hola" o "Gracias" después de ver el menú
+        if "menu_desplegado" in session.pasos_realizados:
+            # Opción A: Forzar al menú (Para obtener KPIs limpios)
+            await wa_send_message(phone, "Por favor, selecciona una opción de la lista anterior para que pueda registrar su falla en mi sistema.")
+            return
+            
+            # Opción B: Pasar a la IA (Flexible - Descomentar si quieres permitir chat libre)
+            # prompt = f"El usuario dice: {mensaje}. Responde amablemente."
+            # reply = await call_glm(prompt, session, mensaje)
+            # await wa_send_message(phone, reply)
+            # return
       
     # ── FASE: ESCALADO A TÉCNICO ─────────────
     elif session.fase == "ESCALADO":
