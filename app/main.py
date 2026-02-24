@@ -214,23 +214,48 @@ async def call_glm(
 # ─────────────────────────────────────────────
 
 async def mw_get_cliente(contrato: str) -> Optional[dict]:
-    """Obtiene datos del cliente desde MikroWisp por documento de identidad (dni)"""
-    headers = {"Authorization": f"Bearer {MIKROWISP_TOKEN}"}
+    """
+    Obtiene datos del cliente desde MikroWisp usando POST y JSON
+    """
+    
+    # Asegúrate que MIKROWISP_BASE termine en /api/v1
+    url = f"{MIKROWISP_BASE}/GetClientsDetails"
+    
+    # El payload JSON (Cuerpo de la petición)
+    payload = {
+        "token": MIKROWISP_TOKEN,
+        "cedula": contrato  # Usamos 'cedula' para buscar por dni
+    }
+    
+    headers = {"Content-Type": "application/json"}
+
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
-            r = await client.post(
-                f"{MIKROWISP_BASE}/GetClientsDetails",
-                params={"cedula": contrato},
-                headers=headers
-            )
+            # Hacemos POST enviando el JSON en el body
+            r = await client.post(url, json=payload, headers=headers)
+            
+            logger.info(f"MIKROWISP URL: {r.url}")
+            logger.info(f"MIKROWISP Status: {r.status_code}")
+            logger.info(f"MIKROWISP Response: {r.text}")
+
             if r.status_code == 200:
                 data = r.json()
-                # CORRECCIÓN 2: La API devuelve 'datos', no 'data'
-                clientes = data.post("datos", [])
-                return clientes[0] if clientes else None
+                
+                # CORRECCIÓN AQUÍ: Usamos .get() para leer el diccionario, no .post()
+                if data.get("estado") == "exito":
+                    clientes = data.get("datos", [])
+                    if clientes:
+                        return clientes[0]
+                
+                logger.warning(f"Cliente no encontrado para ID: {contrato}")
+                return None
+            else:
+                logger.error(f"Error MikroWisp HTTP {r.status_code}: {r.text}")
+                return None
+                
         except Exception as e:
-            logger.error(f"Error MikroWisp get_cliente: {e}")
-    return None
+            logger.error(f"Error de conexión con MikroWisp: {e}")
+            return None
 
 
 async def mw_get_facturas(cliente_id: str) -> dict:
