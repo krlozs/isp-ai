@@ -106,7 +106,7 @@ DATOS DEL CLIENTE:
 ESTADO DE CUENTA: {estado_cuenta}  (ACTIVO / CORTADO_MORA / SUSPENDIDO)
 
 Si ESTADO_CUENTA es ACTIVO:
-→ Saluda al cliente por su nombre, confirma que encontraste su cuenta y pregunta por el problema específico que está experimentando.
+→ Confirma que encontraste su cuenta y pregunta por el problema específico que está experimentando.
 
 Si ESTADO_CUENTA es CORTADO_MORA:
 → Informa amablemente que el servicio está suspendido por falta de pago. 
@@ -203,29 +203,27 @@ Estás en la fase de troubleshooting guiado.
 HISTORIAL DE PASOS YA REALIZADOS: {pasos_realizados}
 RESPUESTA DEL CLIENTE AL ÚLTIMO PASO: "{respuesta_cliente}"
 
-Guía al cliente por los siguientes pasos en orden (salta los ya realizados):
+INSTRUCCIONES DE FLUJO INTELIGENTE:
+El cliente puede no ser técnico. Si su respuesta es vaga, no responde directamente a la pregunta, o parece frustrado, NO INSISTAS. SALTA directamente al paso de reinicio (Paso T3).
 
 PASO T1: ¿El problema es en WiFi o también con cable directo al router?
-  - Si solo WiFi → ir a pasos de WiFi
-  - Si también cable → continuar pasos generales
+  - Si el cliente NO responde claramente "WiFi" o "Cable" (ej: "No tengo internet", "Lento", "No funciona"), -> PASA AL PASO T3.
+  - Si responde claramente -> Continúa.
 
-PASO T2 (WiFi): ¿Cuántos dispositivos tienen el problema? ¿Todos o uno?
-  - Si solo un dispositivo → problema del dispositivo, no del servicio
-  - Si todos → problema del router/servicio
+PASO T2 (WiFi): ¿Cuántos dispositivos tienen el problema?
+  - Si responde -> Continúa.
 
-PASO T3: Reinicio manual del router/ONT: desconectar 30 segundos y volver a conectar.
-  - Esperar 2 minutos después de reconectar.
+PASO T3 (SOLUCIÓN UNIVERSAL - Reinicio):
+  Si llegaste aquí (porque el cliente no fue claro o ya descartaste opciones anteriores):
+  "Para solucionar esto de forma rápida, vamos a reiniciar tu equipo.
+   Por favor, desconecta el router y la ONT de la corriente por 30 segundos y vuelve a conectarlos.
+   O, si prefieres, puedo intentar hacerlo de forma remota."
 
 PASO T4: ¿Mejoró la velocidad o conectividad?
-  - Si sí → problema resuelto con reinicio manual
-  - Si no → escalar a técnico
+  - Si sí -> Problema resuelto.
+  - Si no -> escalar a técnico.
 
-PASO T5: Verificar si las luces del router están normales.
-  - Luz de internet/WAN: debe estar fija o parpadeando verde/azul.
-  - Si está roja o apagada → problema físico, escalar.
-
-Basándote en los pasos ya realizados y la respuesta del cliente, determina el siguiente paso 
-o si debes escalar al técnico. Sé específico y claro. Una instrucción a la vez.
+Basándote en esto, determina el siguiente paso y escribe una respuesta directa. Máximo 3 líneas.
 """.strip()
 
 
