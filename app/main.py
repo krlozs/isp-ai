@@ -517,7 +517,27 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
         # Guardar datos en sesión
         session.contrato = contrato
         session.nombre = cliente.get("nombre")
-        session.serial_ont = cliente.get("serial_ont") or cliente.get("ont_serial")
+
+        # --- NUEVA LÓGICA PARA PLAN Y SERIAL ---
+        # Accedemos a la lista de servicios y extraemos los datos anidados
+        servicios = cliente.get("servicios", [])
+        if servicios:
+            # 1. Extraer el Plan del primer servicio encontrado
+            session.plan = servicios[0].get("perfil", "N/A")
+            
+            # 2. Extraer el Serial ONT del campo 'smartolt' (que es un texto raro de PHP)
+            smartolt_data = servicios[0].get("smartolt", "")
+            import re # Importamos regex para buscar el patrón del serial
+            # Buscamos el patrón s:2:"sn";s:TAMANO:"VALOR"
+            match = re.search(r's:2:"sn";s:\d+:"([^"]+)"', smartolt_data)
+            if match:
+                session.serial_ont = match.group(1) # Extraemos el valor capturado
+            else:
+                session.serial_ont = None
+        else:
+            session.plan = "N/A"
+            session.serial_ont = None
+        # ---------------------------------------
 
         # Verificar estado de cuenta
         facturas = await mw_get_facturas(str(cliente.get("id")))
@@ -526,7 +546,7 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
 
         prompt = PROMPT_CLIENTE_IDENTIFICADO.format(
             nombre=session.nombre,
-            plan=cliente.get("plan", "N/A"),
+            plan=session.plan,  # <--- IMPORTANTE: Cambiado de cliente.get("plan") a session.plan
             estado_servicio=cliente.get("estado", "activo"),
             saldo=f"${saldo:,.0f}" if saldo > 0 else "$0",
             ultimo_ticket=cliente.get("ultimo_ticket", "Ninguno"),
