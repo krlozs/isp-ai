@@ -75,7 +75,7 @@ services:
     environment:
       POSTGRES_DB: isp_ai_db
       POSTGRES_USER: isp_user
-      POSTGRES_PASSWORD: isp_pass
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./app/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
