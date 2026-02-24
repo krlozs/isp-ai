@@ -506,6 +506,60 @@ async def wa_send_buttons(to: str, body: str, buttons: list):
         except Exception as e:
             logger.error(f"Error WhatsApp buttons: {e}")
 
+async def wa_send_list(to: str, header: str, body_text: str, sections: list, button_text: str = "Ver opciones"):
+    """Envía una lista desplegable (hasta 10 opciones) a WhatsApp."""
+    url = f"https://graph.facebook.com/v19.0/{WHATSAPP_PHONE_ID_CLIENTES}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    
+    # Construir el JSON de la lista
+    action_sections = []
+    for sec in sections:
+        rows = []
+        for row in sec.get("rows", []):
+            rows.append({
+                "id": row["id"],      # Este ID es lo que llegará al webhook (ej: kpi_lento)
+                "title": row["title"],
+                "description": row.get("description", "")
+            })
+        action_sections.append({
+            "title": sec.get("title", ""),
+            "rows": rows
+        })
+
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "interactive",
+        "interactive": {
+            "type": "list",
+            "header": {
+                "type": "text",
+                "text": header_text
+            },
+            "body": {
+                "text": body_text
+            },
+            "footer": {
+                "text": "ARIA - Soporte Técnico"
+            },
+            "action": {
+                "button": button_text,
+                "sections": action_sections
+            }
+        }
+    }
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            r = await client.post(url, json=payload, headers=headers)
+            if r.status_code != 200:
+                logger.error(f"Error WhatsApp List: {r.text}")
+        except Exception as e:
+            logger.error(f"Error WhatsApp List: {e}")
+
 
 # ─────────────────────────────────────────────
 # LÓGICA PRINCIPAL DEL FLUJO
@@ -652,42 +706,91 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
         await wa_send_message(phone, reply)
         return
 
-    # ── FASE: TROUBLESHOOTING GUIADO ─────────
+    # ── FASE: TROUBLESHOOTING (Modo Lista Estructurada) ─────────
     elif session.fase == "TROUBLESHOOTING":
 
-        # Detectar frustración
-        if detectar_frustracion(mensaje):
-            prompt = PROMPT_CLIENTE_FRUSTRADO.format(mensaje_cliente=mensaje)
-        else:
-            prompt = PROMPT_TROUBLESHOOTING.format(
-                pasos_realizados=", ".join(session.pasos_realizados) or "Ninguno aún",
-                respuesta_cliente=mensaje
+        # 1. Verificamos si ya enviamos el menú para no spamear
+        # Usamos 'pasos_realizados' como flag simple
+        if "menu_desplegado" not in session.pasos_realizados:
+
+            # Definimos las opciones basadas en los problemas más comunes (KPIs)
+            secciones_menu = [
+                {
+                    "title": "📉 Velocidad / Rendimiento",
+                    "rows": [
+                        {"id": "kpi_lento_todo", "title": "🐌 Todo internet lento"},
+                        {"id": "kpi_wifi_lento", "title": "📶 Solo WiFi lento"},
+                        {"id": "kpi_lag", "title": "🎮 Lag en juegos"}
+                    ]
+                },
+                {
+                    "title": "🚫 Conexión",
+                    "rows": [
+                        {"id": "kpi_no_internet", "title": "🚫 No tengo internet"},
+                        {"id": "kpi_intermitente", "title": "⚡ Se corta a veces"},
+                        {"id": "kpi_dns", "title": "🌐 No carga páginas"}
+                    ]
+                },
+                {
+                    "title": "🔧 Otros / Ayuda",
+                    "rows": [
+                        {"id": "kpi_wifi_no_aparece", "title": "👻 No aparece mi WiFi"},
+                        {"id": "kpi_tecnico", "title": "👨‍🔧 Hablar con técnico"}
+                    ]
+                }
+            ]
+
+            # Enviamos la lista
+            await wa_send_list(
+                phone, 
+                header_text="Diagnóstico de Fallas", 
+                body_text="Selecciona la opción que describe mejor tu problema:", 
+                sections=secciones_menu, 
+                button_text="Seleccionar Problema"
             )
 
-        # 1. Generamos la respuesta de la IA
-        reply = await call_glm(prompt, session, mensaje)
+            # Guardamos que ya mostramos el menú para no volver a mostrarlo
+            session.pasos_realizados.append("menu_desplegado")
+            await save_session(session)
+            return
 
-        # 2. DETECCIÓN DE INTENCIÓN (El código obedece a la IA)
-        # Verificamos si la IA decidió hacer un reinicio en su respuesta
-        # Buscamos palabras clave como "reiniciar", "reboot", "procederé a reiniciar"
-        if any(palabra in reply.lower() for palabra in ["reiniciar", "reboot", "procederé a reiniciar"]):
+        # 2. PROCESAR LA SELECCIÓN DEL USUARIO
+        # Si el mensaje empieza con "kpi_", significa que seleccionó una opción de la lista
+        
+        if mensaje.startswith("kpi_"):
             
-            # Verificamos que no se haya hecho recientemente para evitar bucles
-            if session.serial_ont and not session.reboot_ejecutado:
-                logger.info(f"IA decidió reiniciar ONT {session.serial_ont}. Ejecutando acción.")
-                
-                # Ejecutamos la acción REAL en SmartOLT
-                exito = await so_reboot_ont(session.serial_ont)
-                session.reboot_ejecutado = True
-                await save_session(session)
-                
-                # Si falló el reinicio real, avisamos al usuario (corrección de la IA)
-                if not exito:
-                    reply = "Disculpa, intenté ejecutar el reinicio remoto pero no pude conectar con el equipo. Necesitaré escalar a un técnico."
+            # --- AQUÍ IRÍA LA LÓGICA DE BASE DE DATOS EN EL FUTURO ---
+            # TODO: Guardar en DB 'acciones_ia' -> tipo_accion = mensaje
+            
+            logger.info(f"PROCESANDO KPI: {mensaje}")
+            
+            # Lógica de respuesta según la selección
+            
+            if mensaje == "kpi_no_internet":
+                reply = "Entendido, reportas 'No tengo internet'. Voy a revisar el estado de tu línea ahora mismo."
+                # Aquí podrías llamar a tus funciones de SmartOLT
+                # await so_get_ont_status(...)
+            
+            elif mensaje == "kpi_lento_todo":
+                reply = "Entendido, todo está lento. Voy a verificar si hay congestión en la red o problemas en tu equipo."
+            
+            elif mensaje == "kpi_wifi_lento":
+                reply = "El problema es solo el WiFi. Vamos a intentar reiniciar el módulo WiFi de tu router."
+                # Lógica específica para WiFi
+            
+            elif mensaje == "kpi_tecnico":
+                # Escalar
+                session.fase = "ESCALADO"
+                reply = "Entendido. Voy a programar una visita técnica para ti."
+                # ... lógica de escalado ...
 
-        # 3. Enviamos la respuesta (ya sea la original o la corregida)
-        await wa_send_message(phone, reply)
-        return
+            else:
+                reply = "Opción seleccionada. Analizando información..."
+
+            # Enviamos la respuesta
+            await wa_send_message(phone, reply)
+            return
+      
     # ── FASE: ESCALADO A TÉCNICO ─────────────
     elif session.fase == "ESCALADO":
 
@@ -907,10 +1010,27 @@ async def recibir_mensaje(request: Request, bg: BackgroundTasks):
         if msg_type == "text":
             texto = msg["text"]["body"]
         elif msg_type == "interactive":
-            # Respuesta a botón
-            texto = msg["interactive"]["button_reply"]["id"].replace("csat_", "")
-        else:
-            return JSONResponse({"status": "tipo_no_soportado"})
+            interactive_data = msg.get("interactive", {})
+            tipo_interactivo = interactive_data.get("type")
+            
+            # CASO A: Viene de una LISTA (Selección de KPI)
+            if tipo_interactivo == "list_reply":
+                # El ID es lo que definimos en el paso 1 (ej: "kpi_no_internet")
+                list_reply_id = interactive_data["list_reply"]["id"]
+                
+                # Convertimos ese ID en el "mensaje" para que el flujo principal lo procese
+                mensaje = list_reply_id
+                
+                # OPCIONAL: Log temporal para ver que funciona antes de conectar la DB
+                logger.info(f"KPI SELECCIONADO: {list_reply_id}") 
+
+            # CASO B: Viene de BOTONES (Confirmaciones, CSAT)
+            elif tipo_interactivo == "button_reply":
+                button_id = interactive_data["button_reply"]["id"]
+                mensaje = button_id.replace("csat_", "")
+            
+            else:
+                return JSONResponse({"status": "interactive_type_not_supported"})
 
         logger.info(f"📱 Mensaje de {phone}: {texto[:50]}")
 
