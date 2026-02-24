@@ -664,20 +664,30 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
                 respuesta_cliente=mensaje
             )
 
+        # 1. Generamos la respuesta de la IA
         reply = await call_glm(prompt, session, mensaje)
 
-        # Detectar si el LLM decidió escalar
-        if necesita_escalado(reply):
-            session.fase = "ESCALADO"
+        # 2. DETECCIÓN DE INTENCIÓN (El código obedece a la IA)
+        # Verificamos si la IA decidió hacer un reinicio en su respuesta
+        # Buscamos palabras clave como "reiniciar", "reboot", "procederé a reiniciar"
+        if any(palabra in reply.lower() for palabra in ["reiniciar", "reboot", "procederé a reiniciar"]):
+            
+            # Verificamos que no se haya hecho recientemente para evitar bucles
+            if session.serial_ont and not session.reboot_ejecutado:
+                logger.info(f"IA decidió reiniciar ONT {session.serial_ont}. Ejecutando acción.")
+                
+                # Ejecutamos la acción REAL en SmartOLT
+                exito = await so_reboot_ont(session.serial_ont)
+                session.reboot_ejecutado = True
+                await save_session(session)
+                
+                # Si falló el reinicio real, avisamos al usuario (corrección de la IA)
+                if not exito:
+                    reply = "Disculpa, intenté ejecutar el reinicio remoto pero no pude conectar con el equipo. Necesitaré escalar a un técnico."
 
-        # Detectar si el LLM indicó resolución
-        if esta_resuelto(reply):
-            session.fase = "CSAT"
-
-        await save_session(session)
+        # 3. Enviamos la respuesta (ya sea la original o la corregida)
         await wa_send_message(phone, reply)
         return
-
     # ── FASE: ESCALADO A TÉCNICO ─────────────
     elif session.fase == "ESCALADO":
 
