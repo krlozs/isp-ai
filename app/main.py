@@ -160,7 +160,7 @@ async def call_glm(
     temperatura: float = 0.7
 ) -> str:
     """
-    Llama a GLM 4.7-Flash con el historial de conversación.
+    Llama a GLM 4.7 con el historial de conversación.
     Mantiene contexto completo de la sesión.
     """
     system = SYSTEM_PROMPT.format(**ISP_CONFIG)
@@ -172,7 +172,7 @@ async def call_glm(
 
     try:
         response = glm_client.chat.completions.create(
-            model="glm-4-flash",
+            model="glm-4.7",
             messages=messages,
             temperature=temperatura,
             max_tokens=500,
