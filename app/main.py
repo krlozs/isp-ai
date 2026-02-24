@@ -210,19 +210,21 @@ async def call_glm(
 # INTEGRACIÓN: MIKROWISP API
 # ─────────────────────────────────────────────
 
-async def mw_get_cliente(dni: str) -> Optional[dict]:
+async def mw_get_cliente(contrato: str) -> Optional[dict]:
     """Obtiene datos del cliente desde MikroWisp por documento de identidad (dni)"""
     headers = {"Authorization": f"Bearer {MIKROWISP_TOKEN}"}
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             r = await client.get(
                 f"{MIKROWISP_BASE}/GetClientsDetails",
-                params={"cedula": dni},
+                params={"cedula": contrato},
                 headers=headers
             )
             if r.status_code == 200:
                 data = r.json()
-                return data.get("data", [None])[0]
+                # CORRECCIÓN 2: La API devuelve 'datos', no 'data'
+                clientes = data.get("datos", [])
+                return clientes[0] if clientes else None
         except Exception as e:
             logger.error(f"Error MikroWisp get_cliente: {e}")
     return None
