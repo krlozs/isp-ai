@@ -560,7 +560,6 @@ async def wa_send_list(to: str, header: str, body_text: str, sections: list, but
         except Exception as e:
             logger.error(f"Error WhatsApp List: {e}")
 
-
 # ─────────────────────────────────────────────
 # LÓGICA PRINCIPAL DEL FLUJO
 # ─────────────────────────────────────────────
