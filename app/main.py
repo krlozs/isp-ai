@@ -51,7 +51,9 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="ISP AI Support System", version="1.0.0")
 
 # Clientes de servicios externos
-glm_client = ZhipuAI(api_key=os.getenv("GLM_API_KEY"))
+# glm_client = ZhipuAI(api_key=os.getenv("GLM_API_KEY"))
+ZAI_API_URL = os.getenv("ZAI_API_URL", "https://api.z.ai/api/paas/v4/chat/completions")
+GLM_API_KEY = os.getenv("GLM_API_KEY")
 redis_client: aioredis.Redis = None
 
 MIKROWISP_BASE = os.getenv("MIKROWISP_API_URL")       # ej: https://tu-mikrowisp.com/api/v1
@@ -151,7 +153,7 @@ async def clear_session(phone: str):
 
 
 # ─────────────────────────────────────────────
-# INTEGRACIÓN: GLM 4.7-Flash
+# INTEGRACIÓN: GLM (via Z.AI API / httpx)
 # ─────────────────────────────────────────────
 
 async def call_glm(
@@ -160,34 +162,49 @@ async def call_glm(
     temperatura: float = 0.7
 ) -> str:
     """
-    Llama a GLM 4.7 con el historial de conversación.
-    Mantiene contexto completo de la sesión.
+    Llama a Z.AI (Internacional) usando httpx directamente.
+    Esto evita el problema de la librería zhipuai que apunta a China.
     """
     system = SYSTEM_PROMPT.format(**ISP_CONFIG)
 
     # Construir mensajes con historial
     messages = [{"role": "system", "content": system}]
-    messages.extend(session.historial[-10:])  # Últimos 10 intercambios
+    messages.extend(session.historial[-10:])
     messages.append({"role": "user", "content": prompt})
 
+    headers = {
+        "Authorization": f"Bearer {GLM_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": "glm-4.7",  # Modelo actual de Z.AI según tu curl
+        "messages": messages,
+        "temperature": temperatura,
+        "max_tokens": 500
+    }
+
     try:
-        response = glm_client.chat.completions.create(
-            model="glm-4.7",
-            messages=messages,
-            temperature=temperatura,
-            max_tokens=500,
-        )
-        reply = response.choices[0].message.content
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(ZAI_API_URL, json=payload, headers=headers)
+            
+            if response.status_code == 200:
+                data = response.json()
+                # La estructura de respuesta es estándar (tipo OpenAI)
+                reply = data["choices"][0]["message"]["content"]
 
-        # Actualizar historial en sesión
-        session.historial.append({"role": "user", "content": prompt})
-        session.historial.append({"role": "assistant", "content": reply})
+                # Actualizar historial
+                session.historial.append({"role": "user", "content": prompt})
+                session.historial.append({"role": "assistant", "content": reply})
 
-        return reply
+                return reply
+            else:
+                logger.error(f"Error Z.AI API: {response.status_code} - {response.text}")
+                return "Disculpa, tuve un problema al contactar la IA (Z.AI)."
 
     except Exception as e:
-        logger.error(f"Error GLM: {e}")
-        return "Disculpa, tuve un problema al procesar tu solicitud. Por favor escribe de nuevo."
+        logger.error(f"Error GLM (Z.AI): {e}")
+        return "Disculpa, ocurrió un error de conexión con el servicio de IA."
 
 
 # ─────────────────────────────────────────────
