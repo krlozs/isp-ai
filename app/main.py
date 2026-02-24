@@ -190,6 +190,13 @@ async def call_glm(
         
         reply = response.choices[0].message.content
 
+        # --- AGREGA ESTA VALIDACIÓN ---
+        # Si la IA devuelve vacío, None o solo espacios, usamos un mensaje por defecto
+        if not reply or reply.strip() == "":
+            logger.warning("La IA devolvió una respuesta vacía, usando fallback.")
+            reply = "Lo siento, no pude generar una respuesta en este momento."
+        # -------------------------------
+
         session.historial.append({"role": "user", "content": prompt})
         session.historial.append({"role": "assistant", "content": reply})
 
