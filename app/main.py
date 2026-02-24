@@ -211,27 +211,19 @@ async def call_glm(
 # ─────────────────────────────────────────────
 
 async def mw_get_cliente(contrato: str) -> Optional[dict]:
-    """Obtiene datos del cliente desde MikroWisp por contrato (ID)"""
-    
-    # 1. Definimos el payload JSON como indica la documentación
-    payload = {
-        "token": MIKROWISP_TOKEN,
-        "cedula": contrato  # Usamos 'idcliente' para buscar por número de contrato
-        # Si quisieras buscar por DNI/Cédula, cambiarías esto a: "cedula": contrato
-    }
-    
+    """Obtiene datos del cliente desde MikroWisp por documento de identidad (dni)"""
+    headers = {"Authorization": f"Bearer {MIKROWISP_TOKEN}"}
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
-            # 2. Hacemos el POST enviando el JSON en el body
             r = await client.post(
                 f"{MIKROWISP_BASE}/GetClientsDetails",
-                json=payload 
+                params={"cedula": contrato},
+                headers=headers
             )
-            
             if r.status_code == 200:
                 data = r.json()
-                # 3. Corregimos el método de lectura del diccionario
-                clientes = data.get("datos", [])
+                # CORRECCIÓN 2: La API devuelve 'datos', no 'data'
+                clientes = data.post("datos", [])
                 return clientes[0] if clientes else None
         except Exception as e:
             logger.error(f"Error MikroWisp get_cliente: {e}")
