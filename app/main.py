@@ -61,7 +61,7 @@ SMARTOLT_BASE = os.getenv("SMARTOLT_API_URL")          # ej: https://app.smartol
 SMARTOLT_KEY = os.getenv("SMARTOLT_API_KEY")
 
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
-WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID")
+WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID_CLIENTES")
 VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
 
 TECNICO_WHATSAPP = os.getenv("TECNICO_WHATSAPP_NUMBER")  # ej: 573001234567
@@ -368,7 +368,7 @@ async def so_reboot_ont(serial: str) -> bool:
 
 async def wa_send_message(to: str, message: str):
     """Envía un mensaje de texto por WhatsApp Business API"""
-    url = f"https://graph.facebook.com/v19.0/{WHATSAPP_PHONE_ID_CLIENTES}/messages"
+    url = f"https://graph.facebook.com/v19.0/{WHATSAPP_PHONE_ID}/messages"
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
         "Content-Type": "application/json"
