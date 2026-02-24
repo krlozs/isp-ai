@@ -259,15 +259,31 @@ async def mw_get_cliente(contrato: str) -> Optional[dict]:
 
 
 async def mw_get_facturas(cliente_id: str) -> dict:
-    """Verifica el estado de cuenta del cliente"""
-    headers = {"Authorization": f"Bearer {MIKROWISP_TOKEN}"}
+    """Verifica el estado de cuenta del cliente usando POST y JSON (GetInvoices)"""
+    
+    # Endpoint para facturas
+    url = f"{MIKROWISP_BASE}/GetInvoices"
+    
+    # Payload según documentación
+    # estado: 1 = No pagadas (Pendientes)
+    payload = {
+        "token": MIKROWISP_TOKEN,
+        "idcliente": cliente_id,
+        "estado": 1,  # 1 significa facturas NO PAGADAS
+        "limit": 10   # Opcional: Traer solo las últimas 10 para no saturar
+    }
+    
+    headers = {"Content-Type": "application/json"}
+
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
-            r = await client.get(
-                f"{MIKROWISP_BASE}/facturas",
-                params={"cliente_id": cliente_id, "estado": "pendiente"},
-                headers=headers
-            )
+            # CORRECCIÓN: Usar POST y enviar JSON
+            r = await client.post(url, json=payload, headers=headers)
+            
+            logger.info(f"MIKROWISP Facturas URL: {r.url}")
+            logger.info(f"MIKROWISP Facturas Status: {r.status_code}")
+            # logger.info(f"MIKROWISP Facturas Response: {r.text}") # Descomenta para debug
+
             if r.status_code == 200:
                 return r.json()
         except Exception as e:
