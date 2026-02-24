@@ -736,9 +736,13 @@ def esta_resuelto(reply: str) -> bool:
 @app.get("/webhook")
 async def verificar_webhook(request: Request):
     """Verificación del webhook por Meta"""
+    from fastapi.responses import PlainTextResponse
     params = dict(request.query_params)
-    if params.get("hub.verify_token") == VERIFY_TOKEN:
-        return int(params.get("hub.challenge", 0))
+    mode = params.get("hub.mode")
+    token = params.get("hub.verify_token")
+    challenge = params.get("hub.challenge", "")
+    if mode == "subscribe" and token == VERIFY_TOKEN:
+        return PlainTextResponse(content=challenge, status_code=200)
     raise HTTPException(status_code=403, detail="Token inválido")
 
 
