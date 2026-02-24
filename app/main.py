@@ -706,17 +706,17 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
         await wa_send_message(phone, reply)
         return
 
-    # ── FASE: TROUBLESHOOTING (Modo Lista Estructurada) ─────────
+    # ── FASE: TROUBLESHOOTING (Modo Lista Forzada) ─────────
     elif session.fase == "TROUBLESHOOTING":
 
-        # 1. Verificamos si ya enviamos el menú para no spamear
-        # Usamos 'pasos_realizados' como flag simple
+        # 1. CONTROL DE "BARRERA": Si el menú no se ha mostrado, NO pasamos a la IA.
+        # Verificamos si "menu_desplegado" está en la lista de pasos.
         if "menu_desplegado" not in session.pasos_realizados:
 
-            # Definimos las opciones basadas en los problemas más comunes (KPIs)
+            # Definimos la lista (KPIs)
             secciones_menu = [
                 {
-                    "title": "📉 Velocidad / Rendimiento",
+                    "title": "📉 Problemas de Velocidad",
                     "rows": [
                         {"id": "kpi_lento_todo", "title": "🐌 Todo internet lento"},
                         {"id": "kpi_wifi_lento", "title": "📶 Solo WiFi lento"},
@@ -724,7 +724,7 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
                     ]
                 },
                 {
-                    "title": "🚫 Conexión",
+                    "title": "🚫 Problemas de Conexión",
                     "rows": [
                         {"id": "kpi_no_internet", "title": "🚫 No tengo internet"},
                         {"id": "kpi_intermitente", "title": "⚡ Se corta a veces"},
@@ -740,7 +740,7 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
                 }
             ]
 
-            # Enviamos la lista
+            # Enviar la lista
             await wa_send_list(
                 phone, 
                 header_text="Diagnóstico de Fallas", 
@@ -749,47 +749,40 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
                 button_text="Seleccionar Problema"
             )
 
-            # Guardamos que ya mostramos el menú para no volver a mostrarlo
+            # MARCAR COMO DESPLEGADO
             session.pasos_realizados.append("menu_desplegado")
             await save_session(session)
+            
+            # CRUCIAL: Usamos 'return' para detener la ejecución aquí.
+            # Esto evita que el código siga hacia abajo y ejecute la IA (que es lo que causaba tu problema).
             return
 
-        # 2. PROCESAR LA SELECCIÓN DEL USUARIO
-        # Si el mensaje empieza con "kpi_", significa que seleccionó una opción de la lista
+        # 2. PROCESAR SELECCIÓN (Si el menú ya se mostró)
         
+        # Si el mensaje empieza con "kpi_" es que seleccionó algo de la lista
         if mensaje.startswith("kpi_"):
-            
-            # --- AQUÍ IRÍA LA LÓGICA DE BASE DE DATOS EN EL FUTURO ---
-            # TODO: Guardar en DB 'acciones_ia' -> tipo_accion = mensaje
-            
-            logger.info(f"PROCESANDO KPI: {mensaje}")
-            
-            # Lógica de respuesta según la selección
+            logger.info(f"KPI SELECCIONADO: {mensaje}")
             
             if mensaje == "kpi_no_internet":
-                reply = "Entendido, reportas 'No tengo internet'. Voy a revisar el estado de tu línea ahora mismo."
-                # Aquí podrías llamar a tus funciones de SmartOLT
-                # await so_get_ont_status(...)
-            
+                reply = "Entendido, reportas 'No tengo internet'. Voy a revisar tu línea ahora."
             elif mensaje == "kpi_lento_todo":
-                reply = "Entendido, todo está lento. Voy a verificar si hay congestión en la red o problemas en tu equipo."
-            
+                reply = "Entendido, todo lento. Voy a verificar la red."
             elif mensaje == "kpi_wifi_lento":
-                reply = "El problema es solo el WiFi. Vamos a intentar reiniciar el módulo WiFi de tu router."
-                # Lógica específica para WiFi
-            
+                reply = "Problema de WiFi detectado. Vamos a reiniciarlo."
             elif mensaje == "kpi_tecnico":
-                # Escalar
                 session.fase = "ESCALADO"
-                reply = "Entendido. Voy a programar una visita técnica para ti."
-                # ... lógica de escalado ...
-
+                reply = "Generando ticket para visita técnica."
             else:
-                reply = "Opción seleccionada. Analizando información..."
+                reply = "Opción recibida. Procesando..."
 
-            # Enviamos la respuesta
             await wa_send_message(phone, reply)
             return
+
+        # 3. SI EL USUARIO ESCRIBE TEXTO EN LUGAR DE SELECCIONAR
+        # Si escribió "Lentitud" en lugar de tocar el botón:
+        reply = "Por favor, selecciona una opción de la lista anterior para que pueda ayudarte mejor."
+        await wa_send_message(phone, reply)
+        return
       
     # ── FASE: ESCALADO A TÉCNICO ─────────────
     elif session.fase == "ESCALADO":
