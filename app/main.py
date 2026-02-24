@@ -518,46 +518,52 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
         session.contrato = contrato
         session.nombre = cliente.get("nombre")
 
-        # --- NUEVA LÓGICA PARA MÚLTIPLES SERVICIOS ---
+        # --- LÓGICA PARA MÚLTIPLES SERVICIOS CON SN INDIVIDUAL ---
         servicios = cliente.get("servicios", [])
-        
-        # Lista para armar el texto que leerá la IA
         lista_planes_detalle = []
-        serial_encontrado = None
-        import re # Importamos regex una sola vez fuera del loop
+        import re
+        
+        # Variable para guardar el PRIMER SN encontrado como "principal" (por si lo necesitamos para reinicios rápidos)
+        serial_principal_encontrado = None
 
-        # Recorremos todos los servicios del cliente
+        # Recorremos CADA servicio por separado
         for serv in servicios:
             tipo = serv.get("tiposervicio", "General")
             nombre_plan = serv.get("perfil", "Sin Plan")
             estado = serv.get("status_user", "Desconocido")
             
-            # Agregamos el detalle a la lista (ej: "internet: Mi Inter 100 (Estado: ONLINE)")
-            lista_planes_detalle.append(f"- {tipo}: {nombre_plan} (Estado: {estado})")
+            # 1. Intentamos buscar el SN ESPECÍFICO de este servicio
+            sn_texto = ""
+            smartolt_data = serv.get("smartolt", "")
+            match = re.search(r's:2:"sn";s:\d+:"([^"]+)"', smartolt_data)
+            
+            if match:
+                sn_extraido = match.group(1)
+                # Añadimos el SN al texto del servicio
+                sn_texto = f" [SN: {sn_extraido}]"
+                
+                # Guardamos el primero como "serial_ont" de la sesión (para compatibilidad con el código de reinicio actual)
+                if not serial_principal_encontrado:
+                    serial_principal_encontrado = sn_extraido
+            
+            # 2. Construimos la línea del texto con el SN incluido
+            lista_planes_detalle.append(f"- {tipo}: {nombre_plan} (Estado: {estado}){sn_texto}")
 
-            # Buscamos el Serial ONT (Solo si no hemos encontrado uno todavía)
-            # Asumimos que el primer servicio con datos de smartolt es el principal (Internet)
-            if not serial_encontrado:
-                smartolt_data = serv.get("smartolt", "")
-                match = re.search(r's:2:"sn";s:\d+:"([^"]+)"', smartolt_data)
-                if match:
-                    serial_encontrado = match.group(1)
-
-        # Guardamos la lista completa como un string separado por saltos de línea
+        # Guardamos la lista completa
         session.plan = "\n".join(lista_planes_detalle) if lista_planes_detalle else "N/A"
         
-        # Guardamos el serial encontrado
-        session.serial_ont = serial_encontrado
-        # ---------------------------------------
+        # Guardamos el serial principal (para funciones que esperan un solo serial)
+        session.serial_ont = serial_principal_encontrado
+        # -------------------------------------------------------------
 
-        # Verificar estado de cuenta
+        # Verificar estado de cuenta (resto igual)
         facturas = await mw_get_facturas(str(cliente.get("id")))
         saldo = facturas.get("total_pendiente", 0)
         estado_cuenta = "CORTADO_MORA" if saldo > 0 and cliente.get("estado") == "suspendido" else "ACTIVO"
 
         prompt = PROMPT_CLIENTE_IDENTIFICADO.format(
             nombre=session.nombre,
-            plan=session.plan, # Ahora la IA verá todos los servicios aquí
+            plan=session.plan, # Ahora tendrá los SNs embebidos
             estado_servicio=cliente.get("estado", "activo"),
             saldo=f"${saldo:,.0f}" if saldo > 0 else "$0",
             ultimo_ticket=cliente.get("ultimo_ticket", "Ninguno"),
