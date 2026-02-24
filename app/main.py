@@ -368,7 +368,7 @@ async def so_reboot_ont(serial: str) -> bool:
 
 async def wa_send_message(to: str, message: str):
     """Envía un mensaje de texto por WhatsApp Business API"""
-    url = f"https://graph.facebook.com/v19.0/{WHATSAPP_PHONE_ID}/messages"
+    url = f"https://graph.facebook.com/v19.0/{WHATSAPP_PHONE_ID_CLIENTES}/messages"
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
         "Content-Type": "application/json"
