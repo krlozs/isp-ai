@@ -353,10 +353,9 @@ async def mw_cerrar_ticket(ticket_id: str, resolucion: str):
 
 async def _get_onu_external_id(serial: str) -> Optional[str]:
     """Paso 1: Obtiene el unique_external_id usando el Serial Number."""
-    headers = {"X-Token": SMARTOLT_KEY} # <--- CAMBIO CLAVE: X-Token en lugar de Bearer
+    headers = {"X-Token": SMARTOLT_KEY} 
     
-    # Asumimos que SMARTOLT_BASE es el dominio (ej: https://app.smartolt.com)
-    # Si tu variable ya incluye /api, ajusta la línea abajo para no duplicarlo.
+    # Nota: Asegúrate que SMARTOLT_BASE en .env NO termine con /
     url = f"{SMARTOLT_BASE}/api/onu/get_onus_details_by_sn/{serial}"
 
     async with httpx.AsyncClient(timeout=10.0) as client:
@@ -364,19 +363,27 @@ async def _get_onu_external_id(serial: str) -> Optional[str]:
             r = await client.get(url, headers=headers)
             if r.status_code == 200:
                 data = r.json()
-                # Extraemos el ID. La estructura puede variar, buscamos la clave directa o anidada.
-                # Ajusta 'data.get(...)' según la respuesta JSON exacta que recibas.
-                onu_id = data.get("unique_external_id")
-                if onu_id:
-                    return onu_id
+                
+                # --- CORRECCIÓN AQUÍ ---
+                # La respuesta tiene la estructura {'onus': [...]}
+                onus_list = data.get("onus")
+                
+                if onus_list and len(onus_list) > 0:
+                    # Tomamos el ID del primer elemento de la lista
+                    onu_id = onus_list[0].get("unique_external_id")
+                    if onu_id:
+                        logger.info(f"SmartOLT ID encontrado para SN {serial}: {onu_id}")
+                        return onu_id
+                    else:
+                        logger.warning(f"Field unique_external_id missing in onu item for SN {serial}")
                 else:
-                    logger.warning(f"No se encontró unique_external_id para SN {serial}. Respuesta: {data}")
+                    logger.warning(f"Empty onus list in response for SN {serial}")
+                # -------------------------
             else:
                 logger.error(f"Error SmartOLT get_onus_details_by_sn: {r.status_code} - {r.text}")
         except Exception as e:
             logger.error(f"Error SmartOLT get_external_id: {e}")
     return None
-
 
 async def so_get_ont_status(serial: str) -> Optional[dict]:
     """Obtiene el estado actual de una ONT (Paso 2)"""
