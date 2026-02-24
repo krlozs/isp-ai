@@ -182,10 +182,10 @@ async def call_glm(
 
     try:
         response = await glm_client.chat.completions.create(
-            model="GLM-4.7",  # Modelo permitido en Coding Plan
+            model="GLM-4.5-Air",  # Modelo permitido en Coding Plan
             messages=messages,
             temperature=temperatura,
-            max_tokens=500
+            max_tokens=2000
         )
 
         # Agregamos este log temporal para ver qué está llegando
