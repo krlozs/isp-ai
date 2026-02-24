@@ -348,73 +348,97 @@ async def mw_cerrar_ticket(ticket_id: str, resolucion: str):
 
 
 # ─────────────────────────────────────────────
-# INTEGRACIÓN: SMARTOLT API
+# INTEGRACIÓN: SMARTOLT API (Versión 2 pasos)
 # ─────────────────────────────────────────────
 
-async def so_get_ont_status(serial: str) -> Optional[dict]:
-    """Obtiene el estado actual de una ONT por serial"""
-    headers = {"Authorization": f"Bearer {SMARTOLT_KEY}"}
+async def _get_onu_external_id(serial: str) -> Optional[str]:
+    """Paso 1: Obtiene el unique_external_id usando el Serial Number."""
+    headers = {"X-Token": SMARTOLT_KEY} # <--- CAMBIO CLAVE: X-Token en lugar de Bearer
+    
+    # Asumimos que SMARTOLT_BASE es el dominio (ej: https://app.smartolt.com)
+    # Si tu variable ya incluye /api, ajusta la línea abajo para no duplicarlo.
+    url = f"{SMARTOLT_BASE}/api/onu/get_onus_details_by_sn/{serial}"
+
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
-            r = await client.get(
-                f"{SMARTOLT_BASE}/onts/{serial}",
-                headers=headers
-            )
+            r = await client.get(url, headers=headers)
+            if r.status_code == 200:
+                data = r.json()
+                # Extraemos el ID. La estructura puede variar, buscamos la clave directa o anidada.
+                # Ajusta 'data.get(...)' según la respuesta JSON exacta que recibas.
+                onu_id = data.get("unique_external_id")
+                if onu_id:
+                    return onu_id
+                else:
+                    logger.warning(f"No se encontró unique_external_id para SN {serial}. Respuesta: {data}")
+            else:
+                logger.error(f"Error SmartOLT get_onus_details_by_sn: {r.status_code} - {r.text}")
+        except Exception as e:
+            logger.error(f"Error SmartOLT get_external_id: {e}")
+    return None
+
+
+async def so_get_ont_status(serial: str) -> Optional[dict]:
+    """Obtiene el estado actual de una ONT (Paso 2)"""
+    # Paso 1: Obtener ID
+    onu_id = await _get_onu_external_id(serial)
+    if not onu_id:
+        return None
+
+    headers = {"X-Token": SMARTOLT_KEY}
+    url = f"{SMARTOLT_BASE}/api/onu/get_onu_status/{onu_id}"
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            r = await client.get(url, headers=headers)
             if r.status_code == 200:
                 return r.json()
+            else:
+                logger.error(f"Error SmartOLT get_onu_status: {r.status_code}")
         except Exception as e:
-            logger.error(f"Error SmartOLT get_ont: {e}")
+            logger.error(f"Error SmartOLT get_status: {e}")
     return None
 
 
 async def so_get_signal(serial: str) -> Optional[dict]:
-    """Obtiene nivel de señal óptica de la ONT"""
-    headers = {"Authorization": f"Bearer {SMARTOLT_KEY}"}
+    """Obtiene nivel de señal óptica de la ONT (Paso 2)"""
+    # Paso 1: Obtener ID
+    onu_id = await _get_onu_external_id(serial)
+    if not onu_id:
+        return None
+
+    headers = {"X-Token": SMARTOLT_KEY}
+    url = f"{SMARTOLT_BASE}/api/onu/get_onu_signal/{onu_id}"
+
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
-            r = await client.get(
-                f"{SMARTOLT_BASE}/onts/{serial}/signal",
-                headers=headers
-            )
+            r = await client.get(url, headers=headers)
             if r.status_code == 200:
                 return r.json()
+            else:
+                logger.error(f"Error SmartOLT get_signal: {r.status_code}")
         except Exception as e:
             logger.error(f"Error SmartOLT get_signal: {e}")
     return None
 
 
-async def so_get_alarmas(olt_id: str) -> list:
-    """Obtiene alarmas activas en un nodo/OLT"""
-    headers = {"Authorization": f"Bearer {SMARTOLT_KEY}"}
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        try:
-            r = await client.get(
-                f"{SMARTOLT_BASE}/alarms",
-                params={"olt_id": olt_id},
-                headers=headers
-            )
-            if r.status_code == 200:
-                return r.json().get("alarms", [])
-        except Exception as e:
-            logger.error(f"Error SmartOLT get_alarmas: {e}")
-    return []
-
-
 async def so_reboot_ont(serial: str) -> bool:
     """
-    Ejecuta reinicio remoto de una ONT.
+    Ejecuta reinicio remoto de una ONT (Paso 2).
     Retorna True si el comando fue enviado exitosamente.
     """
-    headers = {
-        "Authorization": f"Bearer {SMARTOLT_KEY}",
-        "Content-Type": "application/json"
-    }
+    # Paso 1: Obtener ID
+    onu_id = await _get_onu_external_id(serial)
+    if not onu_id:
+        return False
+
+    headers = {"X-Token": SMARTOLT_KEY}
+    # Nota: El endpoint es POST según tu curl
+    url = f"{SMARTOLT_BASE}/api/onu/reboot/{onu_id}"
+
     async with httpx.AsyncClient(timeout=15.0) as client:
         try:
-            r = await client.post(
-                f"{SMARTOLT_BASE}/onts/{serial}/reboot",
-                headers=headers
-            )
+            r = await client.post(url, headers=headers)
             return r.status_code in (200, 202)
         except Exception as e:
             logger.error(f"Error SmartOLT reboot: {e}")
