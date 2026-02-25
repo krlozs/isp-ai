@@ -689,6 +689,65 @@ async def wa_send_list(to: str, header_text: str, body_text: str, sections: list
             logger.error(f"Error WhatsApp List: {e}")
 
 # ─────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────
+
+def extraer_señal_rx(señal_data: dict) -> Optional[float]:
+    """Extrae el valor numérico de señal Rx desde onu_signal_1490."""
+    if not señal_data:
+        return None
+    raw = señal_data.get("onu_signal_1490") or señal_data.get("onu_signal_value", "")
+    try:
+        import re
+        match = re.search(r"(-?\d+\.?\d*)", str(raw))
+        if match:
+            val = float(match.group(1))
+            return val if val != 0.0 else None
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
+def extraer_contrato(texto: str) -> Optional[str]:
+    """Extrae número de contrato o cédula del texto del cliente"""
+    import re
+    numeros = re.findall(r'\b\d{6,12}\b', texto)
+    return numeros[0] if numeros else None
+
+
+def extraer_horario(texto: str) -> str:
+    """Detecta preferencia de horario. Retorna MAÑANA o TARDE para MikroWisp."""
+    texto_lower = texto.lower()
+    if any(p in texto_lower for p in ["mañana", "manana", "am", "8", "9", "10", "11"]):
+        return "MAÑANA"
+    if any(p in texto_lower for p in ["tarde", "pm", "1", "2", "3", "4", "5"]):
+        return "TARDE"
+    return "MAÑANA"
+
+
+def detectar_frustracion(texto: str) -> bool:
+    """Detecta señales de frustración en el mensaje del cliente"""
+    palabras_clave = [
+        "molesto", "cansado", "harto", "terrible", "pésimo", "pesimo",
+        "nunca funciona", "siempre falla", "qué malo", "que malo",
+        "incompetentes", "inútiles", "inutiles", "horrible", "basura"
+    ]
+    return any(p in texto.lower() for p in palabras_clave)
+
+
+def necesita_escalado(reply: str) -> bool:
+    """Detecta si el LLM indicó necesidad de escalar"""
+    indicadores = ["enviar técnico", "visita técnica", "técnico de campo", "escalar", "programar visita"]
+    return any(i in reply.lower() for i in indicadores)
+
+
+def esta_resuelto(reply: str) -> bool:
+    """Detecta si el LLM confirmó resolución del problema"""
+    indicadores = ["problema resuelto", "servicio restaurado", "ya tienes conexión", "funcionando correctamente"]
+    return any(i in reply.lower() for i in indicadores)
+
+
+# ─────────────────────────────────────────────
 # LÓGICA PRINCIPAL DEL FLUJO
 # ─────────────────────────────────────────────
 
@@ -1322,61 +1381,6 @@ async def ejecutar_reboot_y_verificar(phone: str, serial: str, session: SessionS
 # HELPERS
 # ─────────────────────────────────────────────
 
-def extraer_señal_rx(señal_data: dict) -> Optional[float]:
-    """
-    Extrae el valor numérico de señal Rx desde la respuesta de get_onu_signal.
-    El campo real es onu_signal_1490 con formato '-9.68 dBm'.
-    """
-    if not señal_data:
-        return None
-    raw = señal_data.get("onu_signal_1490") or señal_data.get("onu_signal_value", "")
-    try:
-        # Extraer solo el número, ej: "-9.68 dBm" → -9.68
-        import re
-        match = re.search(r"(-?\d+\.?\d*)", str(raw))
-        if match:
-            val = float(match.group(1))
-            return val if val != 0.0 else None
-    except (ValueError, TypeError):
-        pass
-    return None
-    """Extrae número de contrato o cédula del texto del cliente"""
-    import re
-    numeros = re.findall(r'\b\d{6,12}\b', texto)
-    return numeros[0] if numeros else None
-
-
-def extraer_horario(texto: str) -> str:
-    """Detecta preferencia de horario en el texto. Retorna MAÑANA o TARDE para MikroWisp."""
-    texto_lower = texto.lower()
-    if any(p in texto_lower for p in ["mañana", "manana", "am", "8", "9", "10", "11"]):
-        return "MAÑANA"
-    if any(p in texto_lower for p in ["tarde", "pm", "1", "2", "3", "4", "5"]):
-        return "TARDE"
-    return "MAÑANA"
-
-
-def detectar_frustracion(texto: str) -> bool:
-    """Detecta señales de frustración en el mensaje del cliente"""
-    palabras_clave = [
-        "molesto", "cansado", "harto", "terrible", "pésimo", "pesimo",
-        "nunca funciona", "siempre falla", "qué malo", "que malo",
-        "incompetentes", "inútiles", "inutiles", "horrible", "basura"
-    ]
-    texto_lower = texto.lower()
-    return any(p in texto_lower for p in palabras_clave)
-
-
-def necesita_escalado(reply: str) -> bool:
-    """Detecta si el LLM indicó necesidad de escalar"""
-    indicadores = ["enviar técnico", "visita técnica", "técnico de campo", "escalar", "programar visita"]
-    return any(i in reply.lower() for i in indicadores)
-
-
-def esta_resuelto(reply: str) -> bool:
-    """Detecta si el LLM confirmó resolución del problema"""
-    indicadores = ["problema resuelto", "servicio restaurado", "ya tienes conexión", "funcionando correctamente"]
-    return any(i in reply.lower() for i in indicadores)
 
 
 # ─────────────────────────────────────────────
