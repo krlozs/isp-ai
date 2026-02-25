@@ -966,13 +966,12 @@ def extraer_contrato(texto: str) -> Optional[str]:
 
 
 def extraer_horario(texto: str) -> str:
-    """Detecta preferencia de horario en el texto"""
     texto_lower = texto.lower()
     if any(p in texto_lower for p in ["mañana", "manana", "am", "8", "9", "10", "11"]):
-        return "Mañana (8am - 12pm)"
+        return "MAÑANA"   # ✅ Antes: "Mañana (8am - 12pm)"
     if any(p in texto_lower for p in ["tarde", "pm", "1", "2", "3", "4", "5"]):
-        return "Tarde (1pm - 5pm)"
-    return "A coordinar con el técnico"
+        return "TARDE"    # ✅ Antes: "Tarde (1pm - 5pm)"
+    return "MAÑANA"       # ✅ Default válido en vez de "A coordinar con el técnico"
 
 
 def detectar_frustracion(texto: str) -> bool:
