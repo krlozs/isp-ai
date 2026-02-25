@@ -290,40 +290,38 @@ async def mw_get_facturas(cliente_id: str) -> dict:
 
 async def mw_crear_ticket(datos: dict) -> Optional[str]:
     """
-    Crea un ticket de soporte en MikroWisp.
-    Retorna el ID del ticket creado.
+    Crea un ticket de soporte en MikroWisp usando /NewTicket
     """
-    headers = {
-        "Authorization": f"Bearer {MIKROWISP_TOKEN}",
-        "Content-Type": "application/json"
-    }
+    from datetime import date
+
+    headers = {"Content-Type": "application/json"}
+    
     payload = {
-        "cliente_id": datos["cliente_id"],
-        "asunto": datos["asunto"],
-        "descripcion": datos["descripcion"],
-        "prioridad": datos.get("prioridad", "media"),
-        "categoria": datos.get("categoria", "soporte_tecnico"),
-        "datos_tecnicos": {
-            "serial_ont": datos.get("serial_ont"),
-            "señal_dbm": datos.get("señal_dbm"),
-            "estado_ont": datos.get("estado_ont"),
-            "reboot_ejecutado": datos.get("reboot_ejecutado", False),
-            "pasos_realizados": datos.get("pasos_realizados", []),
-        }
+        "token": MIKROWISP_TOKEN,                          # Auth va en el body
+        "idcliente": datos["cliente_id"],                  # era 'cliente_id'
+        "dp": datos.get("dp", 1),                          # Dpto, 1 = Soporte Técnico
+        "asunto": datos.get("asunto", "Ticket de soporte"),
+        "solicitante": datos.get("solicitante", "ARIA Bot"),
+        "fechavisita": datos.get("fechavisita", date.today().strftime("%Y-%m-%d")),
+        "turno": datos.get("turno", "MAÑANA"),             # TARDE o MAÑANA
+        "agendado": datos.get("agendado", "VIA TELEFONICA"),
+        "contenido": datos.get("descripcion", ""),         # era 'descripcion'
     }
+
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             r = await client.post(
-                f"{MIKROWISP_BASE}/tickets",
+                f"{MIKROWISP_BASE}/NewTicket",             # endpoint correcto
                 json=payload,
                 headers=headers
             )
-            if r.status_code in (200, 201):
-                return r.json().get("id") or r.json().get("ticket_id")
+            logger.info(f"MikroWisp NewTicket status: {r.status_code} - {r.text}")
+            if r.status_code == 200:
+                data = r.json()
+                return str(data.get("id") or data.get("ticket_id") or data.get("idticket", ""))
         except Exception as e:
             logger.error(f"Error MikroWisp crear_ticket: {e}")
     return None
-
 
 async def mw_cerrar_ticket(ticket_id: str, resolucion: str):
     """Cierra un ticket en MikroWisp con la descripción de resolución"""
@@ -825,11 +823,13 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
             "cliente_id": session.contrato,
             "asunto": "Falla técnica - Requiere visita",
             "descripcion": f"Diagnóstico IA: ONT {session.serial_ont}. Pasos: {', '.join(session.pasos_realizados)}",
+            "solicitante": session.nombre or "Cliente",
+            "turno": extraer_horario(mensaje),   # MAÑANA o TARDE según el mensaje
+            "agendado": "VIA TELEFONICA",
             "serial_ont": session.serial_ont,
             "reboot_ejecutado": session.reboot_ejecutado,
             "pasos_realizados": session.pasos_realizados,
         })
-
         session.ticket_id = ticket_id
         horario = extraer_horario(mensaje)
 
