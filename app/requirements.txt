@@ -5,11 +5,9 @@ redis[asyncio]==5.0.7
 sqlalchemy==2.0.31
 alembic==1.13.2
 psycopg2-binary==2.9.9
-zhipuai==2.0.1
 pydantic==2.7.4
 pydantic-settings==2.3.4
 python-dotenv==1.0.1
 celery==5.4.0
 python-multipart==0.0.9
 pillow==10.4.0
-openai>=1.0.0
