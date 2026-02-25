@@ -701,6 +701,8 @@ async def wa_send_message_tecnico_con_fallback(numero_tecnico: str, mensaje: str
 
 
 async def wa_send_buttons(to: str, body: str, buttons: list):
+    """Envía mensaje con botones interactivos (máx 3 botones)"""
+    url = f"https://graph.facebook.com/v19.0/{WHATSAPP_PHONE_ID}/messages"
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
         "Content-Type": "application/json"
