@@ -159,10 +159,16 @@ async def get_session(phone: str) -> SessionState:
 async def save_session(session: SessionState):
     """Guarda la sesión en Redis con TTL de 30 minutos"""
     session.updated_at = datetime.now().isoformat()
+    try:
+        # Pydantic v2
+        data = session.model_dump_json()
+    except Exception:
+        # Pydantic v1 fallback
+        data = json.dumps(session.dict())
     await redis_client.setex(
         f"session:{session.phone}",
         ISP_CONFIG["session_ttl_minutes"] * 60,
-        session.model_dump_json()
+        data
     )
 
 
