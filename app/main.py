@@ -659,9 +659,9 @@ async def entregar_tickets_pendientes(numero_tecnico: str):
     key = f"pendiente_tecnico:{numero_tecnico}"
     key_ventana = f"ventana_tecnico:{numero_tecnico}"
     try:
-        # Marcar ventana como activa (TTL 23h para ser conservadores)
-        await redis_client.setex(key_ventana, 23 * 3600, "1")
-        logger.info(f"[VENTANA] Ventana activa para {numero_tecnico} por 23h")
+        # Registrar ventana activa por 24h exactas
+        await redis_client.setex(key_ventana, 24 * 3600, "1")
+        logger.info(f"[VENTANA] Ventana registrada para {numero_tecnico} — válida por 24h")
 
         raw = await redis_client.get(key)
         if not raw:
@@ -697,20 +697,21 @@ async def entregar_tickets_pendientes(numero_tecnico: str):
 
 async def wa_send_message_tecnico_con_fallback(numero_tecnico: str, mensaje: str):
     """
-    Envía al técnico. Si la ventana está activa (técnico escribió hace menos de 23h),
-    envía directo. Si no, guarda en Redis como pendiente Y envía igual
-    (por si Meta lo entrega, el Redis se limpia cuando el técnico responda).
+    Verifica si el técnico tiene ventana activa en Redis (escribió en las últimas 24h).
+    - Ventana activa → envía el mensaje directo.
+    - Ventana cerrada → guarda en Redis como pendiente, no intenta enviar.
+    Meta siempre responde 200 aunque la ventana esté cerrada, por eso
+    usamos Redis como fuente de verdad en lugar del status HTTP.
     """
     key_ventana = f"ventana_tecnico:{numero_tecnico}"
     ventana_activa = await redis_client.get(key_ventana)
 
-    await wa_send_message_tecnico(numero_tecnico, mensaje)
-
     if ventana_activa:
-        logger.info(f"[WA_TECNICO] Ventana activa para {numero_tecnico} — entrega directa")
+        await wa_send_message_tecnico(numero_tecnico, mensaje)
+        logger.info(f"[WA_TECNICO] Ventana activa — mensaje enviado a {numero_tecnico}")
     else:
-        logger.warning(f"[WA_TECNICO] Ventana cerrada para {numero_tecnico} — guardando respaldo en Redis")
         await guardar_ticket_pendiente(numero_tecnico, mensaje)
+        logger.warning(f"[WA_TECNICO] Ventana cerrada para {numero_tecnico} — guardado en Redis como pendiente")
 
 
 async def wa_send_buttons(to: str, body: str, buttons: list):
