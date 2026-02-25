@@ -436,7 +436,10 @@ async def so_get_signal(serial: str) -> Optional[dict]:
             if r.status_code == 200:
                 data = r.json()
                 logger.info(f"[DEBUG get_onu_signal] Parsed: {data}")
-                logger.info(f"[DEBUG get_onu_signal] rx_power extraído: {data.get('rx_power')}")
+                # El campo real es onu_signal_1490 (Rx) y onu_signal_1310 (Tx)
+                logger.info(f"[DEBUG get_onu_signal] onu_signal_1490 (Rx): {data.get('onu_signal_1490')}")
+                logger.info(f"[DEBUG get_onu_signal] onu_signal_1310 (Tx): {data.get('onu_signal_1310')}")
+                logger.info(f"[DEBUG get_onu_signal] onu_signal calidad: {data.get('onu_signal')}")
                 return data
             else:
                 logger.error(f"Error SmartOLT get_signal: {r.status_code}")
@@ -809,13 +812,8 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
 
         señal_rx = None
         if señal_data:
-            try:
-                val = float(señal_data.get("rx_power", 0))
-                # Tratar 0.0 como dato inválido (la API no tiene el valor real)
-                if val != 0.0:
-                    señal_rx = val
-            except (ValueError, TypeError):
-                señal_rx = None
+            señal_rx = extraer_señal_rx(señal_data)
+            logger.info(f"[SEÑAL] Rx extraída: {señal_rx} dBm | Calidad: {señal_data.get('onu_signal')}")
 
         SEÑAL_MIN = ISP_CONFIG.get("señal_minima_dbm", -27.0)
         SEÑAL_MAX = ISP_CONFIG.get("señal_maxima_dbm", -8.0)
@@ -1252,14 +1250,8 @@ async def ejecutar_reboot_y_verificar(phone: str, serial: str, session: SessionS
     señal_post = await so_get_signal(serial)
 
     estado_post = ont_post.get("onu_status", "Offline").lower() if ont_post else "offline"
-    señal_val = None
-    if señal_post:
-        try:
-            val = float(señal_post.get("rx_power", 0))
-            if val != 0.0:
-                señal_val = val
-        except (ValueError, TypeError):
-            señal_val = None
+    señal_val = extraer_señal_rx(señal_post) if señal_post else None
+    logger.info(f"[POST-REBOOT SEÑAL] Rx: {señal_val} dBm")
 
     SEÑAL_MIN = ISP_CONFIG.get("señal_minima_dbm", -27.0)
     SEÑAL_MAX = ISP_CONFIG.get("señal_maxima_dbm", -8.0)
@@ -1330,7 +1322,24 @@ async def ejecutar_reboot_y_verificar(phone: str, serial: str, session: SessionS
 # HELPERS
 # ─────────────────────────────────────────────
 
-def extraer_contrato(texto: str) -> Optional[str]:
+def extraer_señal_rx(señal_data: dict) -> Optional[float]:
+    """
+    Extrae el valor numérico de señal Rx desde la respuesta de get_onu_signal.
+    El campo real es onu_signal_1490 con formato '-9.68 dBm'.
+    """
+    if not señal_data:
+        return None
+    raw = señal_data.get("onu_signal_1490") or señal_data.get("onu_signal_value", "")
+    try:
+        # Extraer solo el número, ej: "-9.68 dBm" → -9.68
+        import re
+        match = re.search(r"(-?\d+\.?\d*)", str(raw))
+        if match:
+            val = float(match.group(1))
+            return val if val != 0.0 else None
+    except (ValueError, TypeError):
+        pass
+    return None
     """Extrae número de contrato o cédula del texto del cliente"""
     import re
     numeros = re.findall(r'\b\d{6,12}\b', texto)
