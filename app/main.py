@@ -117,6 +117,7 @@ class SessionState(BaseModel):
     phone: str
     fase: str = "IDENTIFICACION"          # Fase actual del flujo
     contrato: Optional[str] = None
+    id_cliente: Optional[str] = None
     nombre: Optional[str] = None
     plan: Optional[str] = None
     serial_ont: Optional[str] = None
@@ -595,6 +596,7 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
 
         # Guardar datos en sesión
         session.contrato = contrato
+        session.id_cliente = str(cliente.get("id"))
         session.nombre = cliente.get("nombre")
 
         # --- LÓGICA PARA MÚLTIPLES SERVICIOS CON SN INDIVIDUAL ---
@@ -820,7 +822,7 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
     elif session.fase == "ESCALADO":
 
         ticket_id = await mw_crear_ticket({
-            "cliente_id": session.contrato,
+            "cliente_id": session.id_cliente,
             "asunto": "Falla técnica - Requiere visita",
             "descripcion": f"Diagnóstico IA: ONT {session.serial_ont}. Pasos: {', '.join(session.pasos_realizados)}",
             "solicitante": session.nombre or "Cliente",
