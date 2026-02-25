@@ -297,36 +297,36 @@ async def mw_get_facturas(cliente_id: str) -> dict:
 
 async def mw_crear_ticket(datos: dict) -> Optional[str]:
     """
-    Crea un ticket de soporte en MikroWisp.
+    Crea un ticket de soporte en MikroWisp usando /NewTicket.
     Retorna el ID del ticket creado.
     """
-    headers = {
-        "Authorization": f"Bearer {MIKROWISP_TOKEN}",
-        "Content-Type": "application/json"
-    }
+    from datetime import date
+    headers = {"Content-Type": "application/json"}
     payload = {
-        "cliente_id": datos["cliente_id"],
-        "asunto": datos["asunto"],
-        "descripcion": datos["descripcion"],
-        "prioridad": datos.get("prioridad", "media"),
-        "categoria": datos.get("categoria", "soporte_tecnico"),
-        "datos_tecnicos": {
-            "serial_ont": datos.get("serial_ont"),
-            "señal_dbm": datos.get("señal_dbm"),
-            "estado_ont": datos.get("estado_ont"),
-            "reboot_ejecutado": datos.get("reboot_ejecutado", False),
-            "pasos_realizados": datos.get("pasos_realizados", []),
-        }
+        "token":       MIKROWISP_TOKEN,
+        "idcliente":   datos["cliente_id"],
+        "dp":          datos.get("dp", 1),
+        "asunto":      datos.get("asunto", "Ticket de soporte"),
+        "solicitante": datos.get("solicitante", "ARIA Bot"),
+        "fechavisita": datos.get("fechavisita", date.today().strftime("%Y-%m-%d")),
+        "turno":       datos.get("turno", "MAÑANA"),
+        "agendado":    datos.get("agendado", "VIA TELEFONICA"),
+        "contenido":   datos.get("descripcion", ""),
     }
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             r = await client.post(
-                f"{MIKROWISP_BASE}/tickets",
+                f"{MIKROWISP_BASE}/NewTicket",
                 json=payload,
                 headers=headers
             )
-            if r.status_code in (200, 201):
-                return r.json().get("id") or r.json().get("ticket_id")
+            logger.info(f"MikroWisp NewTicket status: {r.status_code} - {r.text}")
+            if r.status_code == 200:
+                data = r.json()
+                if data.get("estado") == "exito":
+                    return str(data.get("id") or data.get("ticket_id") or data.get("idticket", ""))
+                else:
+                    logger.error(f"MikroWisp NewTicket error: {data.get('mensaje')}")
         except Exception as e:
             logger.error(f"Error MikroWisp crear_ticket: {e}")
     return None
@@ -1204,6 +1204,8 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
         })
 
         session.ticket_id = ticket_id
+        numero_destino = os.getenv("NOC_WHATSAPP") if destino == "NOC" else TECNICO_WHATSAPP
+        logger.info(f"Ticket creado: #{ticket_id} | Destino: {destino} | Número notificación: {numero_destino}")
 
         # Mensaje al cliente
         await wa_send_message(
@@ -1215,7 +1217,6 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
         )
 
         # Notificar al técnico o NOC por WhatsApp
-        numero_destino = os.getenv("NOC_WHATSAPP") if destino == "NOC" else TECNICO_WHATSAPP
         if ticket_id and numero_destino:
             msg_destino = (
                 f"🔔 *NUEVO TICKET #{ticket_id}*\n"
