@@ -756,9 +756,29 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
             
             # --- LÓGICA PREDEFINIDA (HARDCODED) PARA KPIs ---
             if mensaje == "kpi_no_internet":
-                reply = "Entendido, reportas 'No tengo internet'. Voy a verificar el estado de tu línea nuevamente."
-                # Aquí podrías llamar a tus funciones de diagnóstico si necesitas más datos
-                # await so_get_ont_status(...)
+                # Re-verificar estado de la ONT
+                ont_status = await so_get_ont_status(session.serial_ont) if session.serial_ont else None
+                estado = ont_status.get("status", "desconocido") if ont_status else "desconocido"
+                
+                if estado == "offline":
+                    # ONT offline → escalar directamente
+                    reply = "He verificado tu equipo y está sin señal. Voy a generar un ticket para que un técnico te visite."
+                    session.fase = "ESCALADO"  # ✅ Avanza la fase
+                else:
+                    # ONT online pero sin internet → pasos de troubleshooting
+                    reply = (
+                        "Tu equipo está conectado a nuestra red pero sin acceso a internet. "
+                        "Por favor intenta estos pasos:\n\n"
+                        "1️⃣ Apaga el router 30 segundos y enciéndelo\n"
+                        "2️⃣ Espera 2 minutos y prueba de nuevo\n\n"
+                        "¿Se resolvió tu problema? Responde *Sí* o *No*"
+                    )
+                    session.fase = "ESCALADO"  # ✅ O crea una fase "ESPERANDO_CONFIRMACION" si quieres más pasos
+                
+                session.pasos_realizados.append("kpi_no_internet")
+                await save_session(session)  # ✅ Guardar el cambio de fase
+                await wa_send_message(phone, reply)
+                return
             
             elif mensaje == "kpi_lento_todo":
                 reply = "Entendido, todo es lento. Voy a revisar si hay congestión en el nodo OLT."
