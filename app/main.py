@@ -67,7 +67,9 @@ WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID_CLIENTES")
 VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
 
-TECNICO_WHATSAPP = os.getenv("TECNICO_WHATSAPP_NUMBER")  # ej: 573001234567
+TECNICO_WHATSAPP = os.getenv("TECNICO_WHATSAPP_NUMBER")
+NOC_WHATSAPP = os.getenv("NOC_WHATSAPP")
+WHATSAPP_PHONE_ID_TECNICOS = os.getenv("WHATSAPP_PHONE_ID_TECNICOS")
 
 # ─────────────────────────────────────────────
 # CONFIGURACIÓN CELERY  <--- PEGA EL CÓDIGO AQUÍ
@@ -600,15 +602,105 @@ async def wa_send_message(to: str, message: str):
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             r = await client.post(url, json=payload, headers=headers)
+            logger.info(f"[WA_SEND] to={to} | status={r.status_code} | response={r.text[:200]}")
             if r.status_code != 200:
                 logger.error(f"Error WhatsApp send: {r.text}")
         except Exception as e:
             logger.error(f"Error WhatsApp: {e}")
 
 
+async def wa_send_message_tecnico(to: str, message: str):
+    """Envía mensajes desde el número dedicado a técnicos/NOC"""
+    phone_id = WHATSAPP_PHONE_ID_TECNICOS or WHATSAPP_PHONE_ID
+    url = f"https://graph.facebook.com/v19.0/{phone_id}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "text",
+        "text": {"body": message}
+    }
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            r = await client.post(url, json=payload, headers=headers)
+            logger.info(f"[WA_TECNICO] to={to} | phone_id={phone_id} | status={r.status_code} | response={r.text[:200]}")
+            if r.status_code != 200:
+                logger.error(f"Error WhatsApp técnico send: {r.text}")
+                return False
+            return True
+        except Exception as e:
+            logger.error(f"Error WhatsApp técnico: {e}")
+            return False
+
+
+async def guardar_ticket_pendiente(numero_tecnico: str, mensaje: str):
+    """Guarda un mensaje pendiente en Redis cuando el técnico no tiene ventana activa."""
+    key = f"pendiente_tecnico:{numero_tecnico}"
+    try:
+        # Obtener lista existente
+        raw = await redis_client.get(key)
+        pendientes = json.loads(raw) if raw else []
+        pendientes.append({
+            "mensaje": mensaje,
+            "timestamp": datetime.now().isoformat()
+        })
+        # Guardar con TTL de 48h
+        await redis_client.setex(key, 48 * 3600, json.dumps(pendientes))
+        logger.warning(f"[PENDIENTE] Ticket guardado para {numero_tecnico} | Total pendientes: {len(pendientes)}")
+    except Exception as e:
+        logger.error(f"Error guardando pendiente para {numero_tecnico}: {e}")
+
+
+async def entregar_tickets_pendientes(numero_tecnico: str):
+    """Entrega todos los tickets pendientes cuando el técnico inicia conversación."""
+    key = f"pendiente_tecnico:{numero_tecnico}"
+    try:
+        raw = await redis_client.get(key)
+        if not raw:
+            return
+        pendientes = json.loads(raw)
+        if not pendientes:
+            return
+
+        logger.info(f"[PENDIENTE] Entregando {len(pendientes)} tickets pendientes a {numero_tecnico}")
+
+        # Aviso previo
+        await wa_send_message_tecnico(
+            numero_tecnico,
+            f"📬 Tienes *{len(pendientes)} ticket(s) pendiente(s)* que no pudieron entregarse antes:\n"
+        )
+
+        # Entregar uno por uno
+        for item in pendientes:
+            ts = item.get("timestamp", "")[:16].replace("T", " ")
+            await wa_send_message_tecnico(
+                numero_tecnico,
+                f"🕐 _{ts}_\n{item['mensaje']}"
+            )
+
+        # Limpiar pendientes
+        await redis_client.delete(key)
+        logger.info(f"[PENDIENTE] Entregados y limpiados para {numero_tecnico}")
+
+    except Exception as e:
+        logger.error(f"Error entregando pendientes a {numero_tecnico}: {e}")
+
+
+async def wa_send_message_tecnico_con_fallback(numero_tecnico: str, mensaje: str):
+    """
+    Intenta enviar al técnico. Si falla por ventana cerrada,
+    guarda el mensaje como pendiente en Redis.
+    """
+    exito = await wa_send_message_tecnico(numero_tecnico, mensaje)
+    if not exito:
+        logger.warning(f"[PENDIENTE] No se pudo entregar a {numero_tecnico}, guardando como pendiente...")
+        await guardar_ticket_pendiente(numero_tecnico, mensaje)
+
+
 async def wa_send_buttons(to: str, body: str, buttons: list):
-    """Envía mensaje con botones interactivos (máx 3 botones)"""
-    url = f"https://graph.facebook.com/v19.0/{WHATSAPP_PHONE_ID}/messages"
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
         "Content-Type": "application/json"
@@ -1232,7 +1324,7 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
             )
             if session.datos_tecnicos:
                 msg_destino += f"📊 *DIAGNÓSTICO:*\n{session.datos_tecnicos}"
-            await wa_send_message(numero_destino, msg_destino)
+            await wa_send_message_tecnico_con_fallback(numero_destino, msg_destino)
 
         session.fase = "ESPERANDO_TECNICO"
         await save_session(session)
@@ -1375,7 +1467,7 @@ async def ejecutar_reboot_y_verificar(phone: str, serial: str, session: SessionS
                 f"🔄 Reboot remoto: Sí, sin éxito\n"
                 f"📊 Estado post-reboot: {estado_post} | Señal: {señal_val or 'N/D'} dBm"
             )
-            await wa_send_message(TECNICO_WHATSAPP, msg_tecnico)
+            await wa_send_message_tecnico_con_fallback(TECNICO_WHATSAPP, msg_tecnico)
 
 
 # ─────────────────────────────────────────────
@@ -1420,6 +1512,20 @@ async def recibir_mensaje(request: Request, bg: BackgroundTasks):
         msg = messages[0]
         phone = msg.get("from")
         msg_type = msg.get("type")
+
+        # Detectar si el mensaje llegó al número de técnicos
+        metadata = value.get("metadata", {})
+        phone_number_id_recibido = metadata.get("phone_number_id", "")
+        es_mensaje_tecnico = (
+            WHATSAPP_PHONE_ID_TECNICOS and
+            phone_number_id_recibido == WHATSAPP_PHONE_ID_TECNICOS
+        )
+
+        # Si es mensaje al número de técnicos → entregar pendientes y no procesar flujo cliente
+        if es_mensaje_tecnico:
+            logger.info(f"📟 Técnico {phone} escribió al número de técnicos")
+            bg.add_task(entregar_tickets_pendientes, phone)
+            return JSONResponse({"status": "ok_tecnico"})
 
         # Extraer texto según tipo de mensaje
         texto = None
