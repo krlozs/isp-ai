@@ -1062,9 +1062,9 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
                     "Tu equipo aparece conectado a nuestra red pero sin internet. "
                     "Para ayudarte mejor: ¿Qué luces ves en tu equipo ahora mismo?",
                     [
-                        {"id": "luces_ninguna",  "title": "🔴 Ninguna encendida"},
-                        {"id": "luces_roja",     "title": "🟠 Luz roja o parpadeando"},
-                        {"id": "luces_normal",   "title": "🟢 Luces normales"},
+                        {"id": "luces_ninguna",  "title": "Sin luces"},
+                        {"id": "luces_roja",     "title": "Luz roja/parpadeando"},
+                        {"id": "luces_normal",   "title": "Luces normales"},
                     ]
                 )
             return
