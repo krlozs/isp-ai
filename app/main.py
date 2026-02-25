@@ -184,7 +184,7 @@ async def clear_session(phone: str):
 async def call_glm(
     prompt: str,
     session: SessionState,
-    raw_user_message: str,  # <--- NUEVO PARÁMETRO: El texto real que escribió el usuario
+    raw_user_message: str,
     temperatura: float = 0.7
 ) -> str:
     """
@@ -193,11 +193,8 @@ async def call_glm(
     """
     system = SYSTEM_PROMPT.format(**ISP_CONFIG)
 
-    # 1. Construimos los mensajes para la API
     messages = [{"role": "system", "content": system}]
-    # Agregamos el historial REAL (solo lo que se dijo antes)
     messages.extend(session.historial[-10:])
-    # Agregamos el PROMPT ACTUAL (instrucciones técnicas) solo para esta petición
     messages.append({"role": "user", "content": prompt})
 
     try:
@@ -209,16 +206,17 @@ async def call_glm(
         )
         reply = response.choices[0].message.content
 
-        # 2. ACTUALIZACIÓN DEL HISTORIAL (CRÍTICO)
-        # Guardamos SOLO la conversación humana real.
-        # NO guardamos el 'prompt' técnico.
-        session.historial.append({"role": "user", "content": raw_user_message})
-        session.historial.append({"role": "assistant", "content": reply})
+        # Solo guardar en historial si raw_user_message es un string válido
+        if raw_user_message and isinstance(raw_user_message, str):
+            session.historial.append({"role": "user", "content": raw_user_message})
+            session.historial.append({"role": "assistant", "content": reply})
 
         return reply
 
     except Exception as e:
+        import traceback
         logger.error(f"Error GLM: {e}")
+        logger.error(f"Error GLM traceback: {traceback.format_exc()}")
         return "Disculpa, tuve un problema al procesar tu solicitud."
 
 # ─────────────────────────────────────────────
