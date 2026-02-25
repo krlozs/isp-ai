@@ -506,7 +506,7 @@ async def wa_send_buttons(to: str, body: str, buttons: list):
         except Exception as e:
             logger.error(f"Error WhatsApp buttons: {e}")
 
-async def wa_send_list(to: str, header: str, body_text: str, sections: list, button_text: str = "Ver opciones"):
+async def wa_send_list(to: str, header_text: str, body_text: str, sections: list, button_text: str = "Ver opciones"):
     """Envía una lista desplegable (hasta 10 opciones) a WhatsApp."""
     url = f"https://graph.facebook.com/v19.0/{WHATSAPP_PHONE_ID_CLIENTES}/messages"
     headers = {
