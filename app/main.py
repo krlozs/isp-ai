@@ -31,8 +31,6 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from celery import Celery
-from zhipuai import ZhipuAI
-from openai import AsyncOpenAI
 
 from prompts import (
     SYSTEM_PROMPT, PROMPT_SALUDO, PROMPT_CLIENTE_IDENTIFICADO,
@@ -45,11 +43,32 @@ from prompts import (
 # CONFIGURACIÓN CLIENTE IA (Z.AI CODING PLAN)
 # ─────────────────────────────────────────────
 
-glm_client = AsyncOpenAI(
-    api_key=os.getenv("GLM_API_KEY"),
-    # Endpoint ESPECÍFICO para Coding Tools según soporte
-    base_url="https://api.z.ai/api/coding/paas/v4" 
-)
+async def call_glm(prompt, session, raw_user_message, temperatura=0.7):
+    headers = {
+        "Authorization": f"Bearer {os.getenv('GLM_API_KEY')}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "GLM-4.5-Air",
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT.format(**ISP_CONFIG)},
+            *session.historial[-10:],
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": temperatura,
+        "max_tokens": 2000
+    }
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.post(
+            "https://api.z.ai/api/coding/paas/v4/chat/completions",
+            json=payload,
+            headers=headers
+        )
+        reply = r.json()["choices"][0]["message"]["content"]
+        if raw_user_message and isinstance(raw_user_message, str):
+            session.historial.append({"role": "user", "content": raw_user_message})
+            session.historial.append({"role": "assistant", "content": reply})
+        return reply
 
 # ─────────────────────────────────────────────
 # CONFIGURACIÓN
