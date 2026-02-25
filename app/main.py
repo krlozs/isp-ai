@@ -56,8 +56,12 @@ glm_client = AsyncOpenAI(
 # ─────────────────────────────────────────────
 
 load_dotenv()
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+# Silenciar librerías ruidosas en DEBUG
+logging.getLogger("httpx").setLevel(logging.INFO)
+logging.getLogger("httpcore").setLevel(logging.INFO)
+logging.getLogger("uvicorn").setLevel(logging.INFO)
 
 app = FastAPI(title="ISP AI Support System", version="1.0.0")
 
@@ -392,7 +396,6 @@ async def _get_onu_external_id(serial: str) -> Optional[str]:
 
 async def so_get_ont_status(serial: str) -> Optional[dict]:
     """Obtiene el estado actual de una ONT (Paso 2)"""
-    # Paso 1: Obtener ID
     onu_id = await _get_onu_external_id(serial)
     if not onu_id:
         return None
@@ -403,8 +406,13 @@ async def so_get_ont_status(serial: str) -> Optional[dict]:
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             r = await client.get(url, headers=headers)
+            logger.debug(f"[DEBUG get_onu_status] URL: {url}")
+            logger.debug(f"[DEBUG get_onu_status] Status HTTP: {r.status_code}")
+            logger.debug(f"[DEBUG get_onu_status] Response raw: {r.text}")
             if r.status_code == 200:
-                return r.json()
+                data = r.json()
+                logger.info(f"[DEBUG get_onu_status] Parsed: {data}")
+                return data
             else:
                 logger.error(f"Error SmartOLT get_onu_status: {r.status_code}")
         except Exception as e:
@@ -414,7 +422,6 @@ async def so_get_ont_status(serial: str) -> Optional[dict]:
 
 async def so_get_signal(serial: str) -> Optional[dict]:
     """Obtiene nivel de señal óptica de la ONT (Paso 2)"""
-    # Paso 1: Obtener ID
     onu_id = await _get_onu_external_id(serial)
     if not onu_id:
         return None
@@ -425,8 +432,14 @@ async def so_get_signal(serial: str) -> Optional[dict]:
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             r = await client.get(url, headers=headers)
+            logger.debug(f"[DEBUG get_onu_signal] URL: {url}")
+            logger.debug(f"[DEBUG get_onu_signal] Status HTTP: {r.status_code}")
+            logger.debug(f"[DEBUG get_onu_signal] Response raw: {r.text}")
             if r.status_code == 200:
-                return r.json()
+                data = r.json()
+                logger.info(f"[DEBUG get_onu_signal] Parsed: {data}")
+                logger.info(f"[DEBUG get_onu_signal] rx_power extraído: {data.get('rx_power')}")
+                return data
             else:
                 logger.error(f"Error SmartOLT get_signal: {r.status_code}")
         except Exception as e:
@@ -799,12 +812,16 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
         señal_rx = None
         if señal_data:
             try:
-                señal_rx = float(señal_data.get("rx_power", 0))
+                val = float(señal_data.get("rx_power", 0))
+                # Tratar 0.0 como dato inválido (la API no tiene el valor real)
+                if val != 0.0:
+                    señal_rx = val
             except (ValueError, TypeError):
                 señal_rx = None
 
         SEÑAL_MIN = ISP_CONFIG.get("señal_minima_dbm", -27.0)
         SEÑAL_MAX = ISP_CONFIG.get("señal_maxima_dbm", -8.0)
+        # Solo se considera degradada si tenemos un valor real y está fuera de rango
         señal_degradada = señal_rx is not None and not (SEÑAL_MAX >= señal_rx >= SEÑAL_MIN)
 
         # ── ESCENARIO A: ONT OFFLINE → Guía manual, sin reboot remoto
@@ -1240,7 +1257,9 @@ async def ejecutar_reboot_y_verificar(phone: str, serial: str, session: SessionS
     señal_val = None
     if señal_post:
         try:
-            señal_val = float(señal_post.get("rx_power", 0))
+            val = float(señal_post.get("rx_power", 0))
+            if val != 0.0:
+                señal_val = val
         except (ValueError, TypeError):
             señal_val = None
 
@@ -1257,20 +1276,56 @@ async def ejecutar_reboot_y_verificar(phone: str, serial: str, session: SessionS
             f"Por favor prueba tu internet. ¿Se resolvió el problema?"
         )
     else:
-        session.fase = "ESCALADO"
+        # Escalar directamente sin llamar procesar_mensaje (bg no disponible en background task)
+        session.fase = "ESPERANDO_TECNICO"
+        session.destino_escalado = "TECNICO"
         session.datos_tecnicos = (
             f"Reboot remoto ejecutado.\n"
             f"Estado post-reboot: {estado_post}\n"
             f"Señal post-reboot: {señal_val or 'N/D'} dBm\n"
-            f"KPI original: {session.kpi_activo or 'velocidad'}"
+            f"KPI original: {session.kpi_activo or 'velocidad/sin_internet'}"
         )
+
+        kpi_labels = {
+            "kpi_lento_todo": "Internet lento",
+            "kpi_wifi_lento": "WiFi lento",
+            "kpi_lag":        "Lag en juegos",
+            "senal_degradada":"Señal óptica degradada",
+        }
+        problema_texto = kpi_labels.get(session.kpi_activo or "", "Falla de conectividad post-reboot")
+
+        ticket_id = await mw_crear_ticket({
+            "cliente_id":  session.id_cliente,
+            "asunto":      f"Falla técnica: {problema_texto[:50]}",
+            "descripcion": session.datos_tecnicos,
+            "solicitante": session.nombre or "Cliente",
+            "turno":       "MAÑANA",
+            "agendado":    "VIA TELEFONICA",
+        })
+        session.ticket_id = ticket_id
         await save_session(session)
+
         await wa_send_message(
             phone,
-            "El reinicio se ejecutó pero tu equipo no logró estabilizarse. "
-            "Voy a escalar tu caso para que un técnico lo revise. 🔧"
+            f"El reinicio se ejecutó pero tu equipo no logró estabilizarse. "
+            f"He registrado tu caso con el ticket *#{ticket_id}*. 🔧\n\n"
+            f"Un técnico revisará tu caso y se pondrá en contacto contigo a la brevedad."
         )
-        await procesar_mensaje(phone, "escalando_post_reboot", None)
+
+        if ticket_id and TECNICO_WHATSAPP:
+            msg_tecnico = (
+                f"🔔 *NUEVO TICKET #{ticket_id}* (Post-Reboot)\n"
+                f"{'=' * 30}\n"
+                f"👤 Cliente: {session.nombre}\n"
+                f"📋 Contrato: {session.contrato}\n"
+                f"📱 Teléfono: {phone}\n"
+                f"🔌 Serial ONT: {session.serial_ont or 'N/D'}\n"
+                f"🌐 IP: {session.ip_cliente or 'N/D'}\n"
+                f"⚠️ Problema: {problema_texto}\n"
+                f"🔄 Reboot remoto: Sí, sin éxito\n"
+                f"📊 Estado post-reboot: {estado_post} | Señal: {señal_val or 'N/D'} dBm"
+            )
+            await wa_send_message(TECNICO_WHATSAPP, msg_tecnico)
 
 
 # ─────────────────────────────────────────────
