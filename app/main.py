@@ -821,19 +821,40 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
     # ── FASE: ESCALADO A TÉCNICO ─────────────
     elif session.fase == "ESCALADO":
 
+        kpi_labels = {
+            "kpi_no_internet": "Sin acceso a internet",
+            "kpi_lento_todo": "Internet lento en todos los dispositivos",
+            "kpi_wifi_lento": "WiFi lento",
+            "kpi_lag": "Lag en juegos online",
+            "kpi_intermitente": "Conexión intermitente / se corta",
+            "kpi_dns": "No carga páginas web",
+            "kpi_wifi_no_aparece": "Red WiFi no aparece",
+            "kpi_tecnico": "Solicitud directa de visita técnica",
+        }
+
+        problemas = [kpi_labels[p] for p in session.pasos_realizados if p in kpi_labels]
+        problema_texto = ", ".join(problemas) if problemas else "Falla de conectividad"
+        reboot_texto = "Sí, sin éxito" if session.reboot_ejecutado else "No fue necesario"
+        horario = extraer_horario(mensaje)
+
+        contenido = (
+            f"Reporte generado por ARIA (Soporte IA)\n\n"
+            f"Problema reportado: {problema_texto}\n"
+            f"Serial ONT: {session.serial_ont or 'No disponible'}\n"
+            f"Reinicio remoto ejecutado: {reboot_texto}\n"
+            f"Atendido vía: WhatsApp\n"
+            f"Teléfono cliente: {phone}"
+        )
+
         ticket_id = await mw_crear_ticket({
             "cliente_id": session.id_cliente,
-            "asunto": "Falla técnica - Requiere visita",
-            "descripcion": f"Diagnóstico IA: ONT {session.serial_ont}. Pasos: {', '.join(session.pasos_realizados)}",
+            "asunto": f"Falla técnica: {problema_texto[:50]}",
+            "descripcion": contenido,
             "solicitante": session.nombre or "Cliente",
-            "turno": extraer_horario(mensaje),   # MAÑANA o TARDE según el mensaje
+            "turno": horario,
             "agendado": "VIA TELEFONICA",
-            "serial_ont": session.serial_ont,
-            "reboot_ejecutado": session.reboot_ejecutado,
-            "pasos_realizados": session.pasos_realizados,
         })
         session.ticket_id = ticket_id
-        horario = extraer_horario(mensaje)
 
         prompt = PROMPT_ESCALADO_TECNICO.format(
             nombre_cliente=session.nombre,
