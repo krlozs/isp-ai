@@ -657,23 +657,30 @@ async def guardar_ticket_pendiente(numero_tecnico: str, mensaje: str):
 async def entregar_tickets_pendientes(numero_tecnico: str):
     """Entrega todos los tickets pendientes cuando el técnico inicia conversación."""
     key = f"pendiente_tecnico:{numero_tecnico}"
+    key_ventana = f"ventana_tecnico:{numero_tecnico}"
     try:
+        # Marcar ventana como activa (TTL 23h para ser conservadores)
+        await redis_client.setex(key_ventana, 23 * 3600, "1")
+        logger.info(f"[VENTANA] Ventana activa para {numero_tecnico} por 23h")
+
         raw = await redis_client.get(key)
         if not raw:
+            logger.info(f"[PENDIENTE] Sin pendientes para {numero_tecnico}")
+            await wa_send_message_tecnico(numero_tecnico, "✅ Estás activo. Te notificaré los próximos tickets en tiempo real.")
             return
+
         pendientes = json.loads(raw)
         if not pendientes:
+            await redis_client.delete(key)
             return
 
         logger.info(f"[PENDIENTE] Entregando {len(pendientes)} tickets pendientes a {numero_tecnico}")
 
-        # Aviso previo
         await wa_send_message_tecnico(
             numero_tecnico,
-            f"📬 Tienes *{len(pendientes)} ticket(s) pendiente(s)* que no pudieron entregarse antes:\n"
+            f"📬 Tienes *{len(pendientes)} ticket(s) pendiente(s)* que no pudieron entregarse antes:"
         )
 
-        # Entregar uno por uno
         for item in pendientes:
             ts = item.get("timestamp", "")[:16].replace("T", " ")
             await wa_send_message_tecnico(
@@ -681,7 +688,6 @@ async def entregar_tickets_pendientes(numero_tecnico: str):
                 f"🕐 _{ts}_\n{item['mensaje']}"
             )
 
-        # Limpiar pendientes
         await redis_client.delete(key)
         logger.info(f"[PENDIENTE] Entregados y limpiados para {numero_tecnico}")
 
@@ -691,12 +697,19 @@ async def entregar_tickets_pendientes(numero_tecnico: str):
 
 async def wa_send_message_tecnico_con_fallback(numero_tecnico: str, mensaje: str):
     """
-    Intenta enviar al técnico. Si falla por ventana cerrada,
-    guarda el mensaje como pendiente en Redis.
+    Envía al técnico. Si la ventana está activa (técnico escribió hace menos de 23h),
+    envía directo. Si no, guarda en Redis como pendiente Y envía igual
+    (por si Meta lo entrega, el Redis se limpia cuando el técnico responda).
     """
-    exito = await wa_send_message_tecnico(numero_tecnico, mensaje)
-    if not exito:
-        logger.warning(f"[PENDIENTE] No se pudo entregar a {numero_tecnico}, guardando como pendiente...")
+    key_ventana = f"ventana_tecnico:{numero_tecnico}"
+    ventana_activa = await redis_client.get(key_ventana)
+
+    await wa_send_message_tecnico(numero_tecnico, mensaje)
+
+    if ventana_activa:
+        logger.info(f"[WA_TECNICO] Ventana activa para {numero_tecnico} — entrega directa")
+    else:
+        logger.warning(f"[WA_TECNICO] Ventana cerrada para {numero_tecnico} — guardando respaldo en Redis")
         await guardar_ticket_pendiente(numero_tecnico, mensaje)
 
 
