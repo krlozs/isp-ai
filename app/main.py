@@ -117,11 +117,15 @@ class SessionState(BaseModel):
     phone: str
     fase: str = "IDENTIFICACION"          # Fase actual del flujo
     contrato: Optional[str] = None
-    id_cliente: Optional[str] = None
+    id_cliente: Optional[str] = None      # ID interno de MikroWisp
     nombre: Optional[str] = None
     plan: Optional[str] = None
     serial_ont: Optional[str] = None
+    ip_cliente: Optional[str] = None      # IP del servicio para ping
     ticket_id: Optional[str] = None
+    kpi_activo: Optional[str] = None      # KPI seleccionado actualmente
+    datos_tecnicos: Optional[str] = None  # Resultados técnicos para el ticket
+    destino_escalado: str = "TECNICO"     # TECNICO o NOC
     pasos_realizados: list = []
     reboot_ejecutado: bool = False
     historial: list = []                  # Historial de mensajes para el LLM
@@ -291,38 +295,40 @@ async def mw_get_facturas(cliente_id: str) -> dict:
 
 async def mw_crear_ticket(datos: dict) -> Optional[str]:
     """
-    Crea un ticket de soporte en MikroWisp usando /NewTicket
+    Crea un ticket de soporte en MikroWisp.
+    Retorna el ID del ticket creado.
     """
-    from datetime import date
-
-    headers = {"Content-Type": "application/json"}
-    
-    payload = {
-        "token": MIKROWISP_TOKEN,                          # Auth va en el body
-        "idcliente": datos["cliente_id"],                  # era 'cliente_id'
-        "dp": datos.get("dp", 1),                          # Dpto, 1 = Soporte Técnico
-        "asunto": datos.get("asunto", "Ticket de soporte"),
-        "solicitante": datos.get("solicitante", "ARIA Bot"),
-        "fechavisita": datos.get("fechavisita", date.today().strftime("%Y-%m-%d")),
-        "turno": datos.get("turno", "MAÑANA"),             # TARDE o MAÑANA
-        "agendado": datos.get("agendado", "VIA TELEFONICA"),
-        "contenido": datos.get("descripcion", ""),         # era 'descripcion'
+    headers = {
+        "Authorization": f"Bearer {MIKROWISP_TOKEN}",
+        "Content-Type": "application/json"
     }
-
+    payload = {
+        "cliente_id": datos["cliente_id"],
+        "asunto": datos["asunto"],
+        "descripcion": datos["descripcion"],
+        "prioridad": datos.get("prioridad", "media"),
+        "categoria": datos.get("categoria", "soporte_tecnico"),
+        "datos_tecnicos": {
+            "serial_ont": datos.get("serial_ont"),
+            "señal_dbm": datos.get("señal_dbm"),
+            "estado_ont": datos.get("estado_ont"),
+            "reboot_ejecutado": datos.get("reboot_ejecutado", False),
+            "pasos_realizados": datos.get("pasos_realizados", []),
+        }
+    }
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             r = await client.post(
-                f"{MIKROWISP_BASE}/NewTicket",             # endpoint correcto
+                f"{MIKROWISP_BASE}/tickets",
                 json=payload,
                 headers=headers
             )
-            logger.info(f"MikroWisp NewTicket status: {r.status_code} - {r.text}")
-            if r.status_code == 200:
-                data = r.json()
-                return str(data.get("id") or data.get("ticket_id") or data.get("idticket", ""))
+            if r.status_code in (200, 201):
+                return r.json().get("id") or r.json().get("ticket_id")
         except Exception as e:
             logger.error(f"Error MikroWisp crear_ticket: {e}")
     return None
+
 
 async def mw_cerrar_ticket(ticket_id: str, resolucion: str):
     """Cierra un ticket en MikroWisp con la descripción de resolución"""
@@ -449,6 +455,115 @@ async def so_reboot_ont(serial: str) -> bool:
         except Exception as e:
             logger.error(f"Error SmartOLT reboot: {e}")
     return False
+
+
+async def so_get_full_status(serial: str) -> Optional[str]:
+    """Obtiene el full status info de la ONT (señal, historial, WAN, interfaces)"""
+    onu_id = await _get_onu_external_id(serial)
+    if not onu_id:
+        return None
+    headers = {"X-Token": SMARTOLT_KEY}
+    url = f"{SMARTOLT_BASE}/api/onu/get_onu_full_status_info/{onu_id}"
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        try:
+            r = await client.get(url, headers=headers)
+            if r.status_code == 200:
+                return r.json().get("full_status_info")
+            else:
+                logger.error(f"Error SmartOLT full_status: {r.status_code}")
+        except Exception as e:
+            logger.error(f"Error SmartOLT full_status: {e}")
+    return None
+
+
+def parsear_full_status(raw: str) -> dict:
+    """Parsea el texto plano de full_status_info y extrae los campos más relevantes."""
+    import re
+    resultado = {}
+
+    def extraer(patron, texto, default="N/D"):
+        m = re.search(patron, texto)
+        return m.group(1).strip() if m else default
+
+    resultado["rx_power"]        = extraer(r"Rx optical power\(dBm\)\s*:\s*(.+)", raw)
+    resultado["tx_power"]        = extraer(r"Tx optical power\(dBm\)\s*:\s*(.+)", raw)
+    resultado["olt_rx_power"]    = extraer(r"OLT Rx ONT optical power\(dBm\)\s*:\s*(.+)", raw)
+    resultado["temperatura"]     = extraer(r"Temperature\(C\)\s*:\s*(.+)", raw)
+    resultado["run_state"]       = extraer(r"Run state\s*:\s*(.+)", raw)
+    resultado["last_down_cause"] = extraer(r"Last down cause\s*:\s*(.+)", raw)
+    resultado["last_up_time"]    = extraer(r"Last up time\s*:\s*(.+)", raw)
+    resultado["last_down_time"]  = extraer(r"Last down time\s*:\s*(.+)", raw)
+    resultado["online_duration"] = extraer(r"ONT online duration\s*:\s*(.+)", raw)
+    resultado["wan_status"]      = extraer(r"IPv4 Connection status\s*:\s*(.+)", raw)
+    resultado["ipv4_address"]    = extraer(r"IPv4 address\s*:\s*(.+)", raw)
+    resultado["wan_type"]        = extraer(r"IPv4 access type\s*:\s*(.+)", raw)
+
+    # Historial de caídas (últimas 3)
+    downs = re.findall(r"DownTime\s*:\s*(.+?)\nDownCause\s*:\s*(.+)", raw)
+    historial = "\n".join([f"  - {t.strip()} -> {c.strip()}" for t, c in downs[:3]])
+    resultado["historial_caidas"] = historial if historial else "Sin caídas recientes"
+
+    return resultado
+
+
+def formatear_datos_tecnicos(parsed: dict, ip_cliente: str, ping_resultado: str, kpi: str) -> str:
+    """Genera el texto formateado para el ticket y el mensaje al técnico/NOC."""
+    kpi_labels = {
+        "kpi_no_internet":    "Sin acceso a internet",
+        "kpi_lento_todo":     "Internet lento en todos los dispositivos",
+        "kpi_wifi_lento":     "WiFi lento",
+        "kpi_lag":            "Lag en juegos online",
+        "kpi_intermitente":   "Conexión intermitente / se corta",
+        "kpi_dns":            "No carga páginas web",
+        "kpi_wifi_no_aparece":"Red WiFi no aparece",
+    }
+    problema = kpi_labels.get(kpi, kpi)
+    return (
+        f"DIAGNOSTICO TECNICO AUTOMATICO - ARIA\n"
+        f"{'=' * 40}\n"
+        f"Problema reportado: {problema}\n\n"
+        f"SENAL OPTICA\n"
+        f"  Rx ONT (dBm):     {parsed.get('rx_power')}\n"
+        f"  Tx ONT (dBm):     {parsed.get('tx_power')}\n"
+        f"  Rx OLT (dBm):     {parsed.get('olt_rx_power')}\n"
+        f"  Temperatura:      {parsed.get('temperatura')} C\n\n"
+        f"ESTADO WAN\n"
+        f"  Conexion:         {parsed.get('wan_status')}\n"
+        f"  Tipo:             {parsed.get('wan_type')}\n"
+        f"  IP cliente:       {parsed.get('ipv4_address')} / {ip_cliente}\n\n"
+        f"HISTORIAL ONT\n"
+        f"  Estado actual:    {parsed.get('run_state')}\n"
+        f"  Ultima caida:     {parsed.get('last_down_time')}\n"
+        f"  Causa:            {parsed.get('last_down_cause')}\n"
+        f"  Ultima subida:    {parsed.get('last_up_time')}\n"
+        f"  Tiempo online:    {parsed.get('online_duration')}\n\n"
+        f"ULTIMAS CAIDAS\n{parsed.get('historial_caidas')}\n\n"
+        f"PING AL CLIENTE ({ip_cliente})\n  {ping_resultado}\n"
+    )
+
+
+async def ejecutar_ping(ip: str) -> str:
+    """Ejecuta ping desde el servidor al cliente y retorna resultado formateado."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ping", "-c", "4", "-W", "2", ip,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+        output = stdout.decode()
+        import re
+        resumen = re.search(r"(\d+ packets transmitted.+)", output)
+        rtt = re.search(r"rtt.+?=\s*(.+)", output)
+        lineas = []
+        if resumen:
+            lineas.append(resumen.group(1).strip())
+        if rtt:
+            lineas.append(f"RTT: {rtt.group(1).strip()}")
+        return "\n  ".join(lineas) if lineas else "Sin respuesta (host inalcanzable)"
+    except Exception as e:
+        logger.error(f"Error ping {ip}: {e}")
+        return "No se pudo ejecutar el ping"
 
 
 # ─────────────────────────────────────────────
@@ -635,6 +750,10 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
         
         # Guardamos el serial principal (para funciones que esperan un solo serial)
         session.serial_ont = serial_principal_encontrado
+
+        # Guardar IP del primer servicio para ping
+        if servicios:
+            session.ip_cliente = servicios[0].get("ip")
         # -------------------------------------------------------------
 
         # Verificar estado de cuenta (resto igual)
@@ -662,236 +781,388 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
         await wa_send_message(phone, reply)
         return
 
-        # ── FASE: DIAGNÓSTICO DE RED (Híbrido) ─────────
+        # ── FASE: DIAGNÓSTICO DE RED ─────────
     elif session.fase == "DIAGNOSTICO_RED":
 
         ont_status = None
-        señal = None
-        alarmas = []
+        señal_data = None
+        onu_status_str = "desconocido"
 
         if session.serial_ont:
             ont_status = await so_get_ont_status(session.serial_ont)
             señal_data = await so_get_signal(session.serial_ont)
-            señal = señal_data.get("rx_power") if señal_data else None
-            olt_id = ont_status.get("olt_id") if ont_status else None
-            if olt_id:
-                alarmas = await so_get_alarmas(olt_id)
 
-        # Cálculo del tipo de falla
-        clientes_afectados = len([a for a in alarmas if a.get("severity") in ("critical", "major")])
-        tipo_falla = "MASIVO" if clientes_afectados > 3 else ("INDIVIDUAL" if ont_status and ont_status.get("status") == "offline" else "NINGUNO")
+        # Determinar estado real de la ONT
+        if ont_status:
+            onu_status_str = ont_status.get("onu_status", "Offline").lower()
 
-        # --- ESCENARIO A: CORTE MASIVO (Automático) ---
-        if tipo_falla == "MASIVO":
-            prompt = PROMPT_DIAGNOSTICO_RED.format(...) # Texto informativo
-            reply = await call_glm(prompt, session, mensaje)
-            session.fase = "FINALIZADO_MASIVO"
-            await wa_send_message(phone, reply)
+        señal_rx = None
+        if señal_data:
+            try:
+                señal_rx = float(señal_data.get("rx_power", 0))
+            except (ValueError, TypeError):
+                señal_rx = None
+
+        SEÑAL_MIN = ISP_CONFIG.get("señal_minima_dbm", -27.0)
+        SEÑAL_MAX = ISP_CONFIG.get("señal_maxima_dbm", -8.0)
+        señal_degradada = señal_rx is not None and not (SEÑAL_MAX >= señal_rx >= SEÑAL_MIN)
+
+        # ── ESCENARIO A: ONT OFFLINE → Guía manual, sin reboot remoto
+        if onu_status_str in ("offline", "power fail", "los"):
+            session.fase = "TROUBLESHOOTING_MANUAL"
+            session.pasos_realizados = [f"ont_estado:{onu_status_str}"]
+            await save_session(session)
+            await wa_send_message(
+                phone,
+                f"He detectado que tu equipo no tiene comunicación con nuestra red "
+                f"(Estado: *{onu_status_str.upper()}*).\n\n"
+                f"Vamos a intentar resolverlo juntos. Por favor revisa lo siguiente:\n\n"
+                f"1️⃣ ¿Las luces de tu equipo están encendidas?\n"
+                f"2️⃣ ¿El cable de fibra (amarillo o verde) está bien conectado?\n"
+                f"3️⃣ ¿Hubo algún corte de luz recientemente?\n\n"
+                f"Responde *Sí* si todo parece normal, o *No* si hay algo raro."
+            )
             return
 
-        # --- ESCENARIO B: FALLA INDIVIDUAL / OFFLINE (Automático) ---
-        elif tipo_falla == "INDIVIDUAL" and session.serial_ont:
-            # Aquí está tu lógica de REINICIO AUTOMÁTICO. NO LA BORRES.
+        # ── ESCENARIO B: ONT ONLINE con señal degradada → Reboot remoto
+        elif onu_status_str == "online" and señal_degradada and session.serial_ont:
             session.fase = "REBOOT_PENDIENTE"
+            session.pasos_realizados = ["senal_degradada"]
+            await save_session(session)
             bg.add_task(ejecutar_reboot_y_verificar, phone, session.serial_ont, session)
-            
-            prompt = PROMPT_DIAGNOSTICO_RED.format(...) # Texto avisando el reboot
-            reply = await call_glm(prompt, session, mensaje)
-            await wa_send_message(phone, reply)
+            await wa_send_message(
+                phone,
+                f"He detectado que tu equipo está conectado pero con señal óptica degradada "
+                f"(*{señal_rx} dBm*). Esto puede causar lentitud o cortes.\n\n"
+                f"⚙️ Voy a reiniciar tu equipo remotamente para intentar estabilizarlo. "
+                f"Por favor espera *2 minutos* sin tocar el router."
+            )
             return
 
-        # --- ESCENARIO C: ONT ONLINE, SEÑAL NORMAL (AQUÍ VA EL MENÚ) ---
-        elif tipo_falla == "NINGUNO":
-            # El equipo está bien, pero el usuario queja. Enviar el Menú KPI en lugar de preguntar.
-            
+        # ── ESCENARIO C: ONT ONLINE señal normal → Mostrar lista KPI
+        else:
             session.fase = "TROUBLESHOOTING"
-            session.pasos_realizados = [] 
+            session.pasos_realizados = []
 
-            # Definir la lista de opciones
             secciones_menu = [
                 {
                     "title": "📉 Problemas de Velocidad",
                     "rows": [
-                        {"id": "kpi_lento_todo", "title": "🐌 Todo internet lento"},
-                        {"id": "kpi_wifi_lento", "title": "📶 Solo WiFi lento"},
-                        {"id": "kpi_lag", "title": "🎮 Lag en juegos"}
+                        {"id": "kpi_lento_todo",  "title": "🐌 Todo internet lento"},
+                        {"id": "kpi_wifi_lento",  "title": "📶 Solo WiFi lento"},
+                        {"id": "kpi_lag",         "title": "🎮 Lag en juegos"},
                     ]
                 },
                 {
                     "title": "🚫 Problemas de Conexión",
                     "rows": [
-                        {"id": "kpi_no_internet", "title": "🚫 No tengo internet"},
+                        {"id": "kpi_no_internet",  "title": "🚫 No tengo internet"},
                         {"id": "kpi_intermitente", "title": "⚡ Se corta a veces"},
-                        {"id": "kpi_dns", "title": "🌐 No carga páginas"}
+                        {"id": "kpi_dns",          "title": "🌐 No carga páginas"},
                     ]
                 },
                 {
-                    "title": "🔧 Otros / Ayuda",
+                    "title": "🔧 Otros",
                     "rows": [
                         {"id": "kpi_wifi_no_aparece", "title": "👻 No aparece mi WiFi"},
-                        {"id": "kpi_tecnico", "title": "👨‍🔧 Hablar con técnico"}
                     ]
                 }
             ]
 
-            # Enviar Lista y DETENER
-            await wa_send_list(
-                phone, 
-                header_text="Diagnóstico de Fallas", 
-                body_text="He revisado tu conexión y parece estar técnica y operativamente bien. Selecciona el problema que experimentas para guiarte:", 
-                sections=secciones_menu, 
-                button_text="Seleccionar Problema"
-            )
-
             session.pasos_realizados.append("menu_desplegado")
             await save_session(session)
+            await wa_send_list(
+                phone,
+                header_text="Diagnóstico de Fallas",
+                body_text=(
+                    "He revisado tu equipo y está conectado correctamente a nuestra red. "
+                    "Selecciona el problema que estás experimentando:"
+                ),
+                sections=secciones_menu,
+                button_text="Seleccionar Problema"
+            )
             return
 
-    # ── FASE: TROUBLESHOOTING (Ejecución de KPIs) ─────────
+    # ── FASE: TROUBLESHOOTING MANUAL (ONT OFFLINE) ────────
+    elif session.fase == "TROUBLESHOOTING_MANUAL":
+
+        respuesta = mensaje.lower().strip()
+        if any(p in respuesta for p in ["sí", "si", "yes", "normal", "bien", "todo bien"]):
+            # El cliente dice que todo parece normal pero sigue offline → escalar técnico
+            session.kpi_activo = "ont_offline_sin_causa_aparente"
+            session.destino_escalado = "TECNICO"
+            session.datos_tecnicos = (
+                f"ONT reportada OFFLINE por el sistema.\n"
+                f"Estado cliente al consultar: {', '.join(session.pasos_realizados)}\n"
+                f"Cliente confirmó que luces y cables parecen normales.\n"
+                f"Serial ONT: {session.serial_ont}\n"
+                f"IP cliente: {session.ip_cliente}"
+            )
+            session.fase = "ESCALADO"
+            await save_session(session)
+            await procesar_mensaje(phone, mensaje, bg)
+        else:
+            # Hay algo raro → verificar si volvió online
+            ont_post = await so_get_ont_status(session.serial_ont) if session.serial_ont else None
+            estado_post = ont_post.get("onu_status", "Offline") if ont_post else "Offline"
+
+            if estado_post.lower() == "online":
+                session.fase = "CSAT"
+                await save_session(session)
+                await wa_send_message(
+                    phone,
+                    "¡Buenas noticias! Tu equipo acaba de volver a conectarse a nuestra red. "
+                    "Por favor prueba tu internet. ¿Se resolvió el problema?"
+                )
+            else:
+                # Sigue offline → escalar técnico
+                session.kpi_activo = "ont_offline_confirmado"
+                session.destino_escalado = "TECNICO"
+                session.datos_tecnicos = (
+                    f"ONT OFFLINE confirmado.\n"
+                    f"Cliente reportó anomalías en luces/cables.\n"
+                    f"Serial ONT: {session.serial_ont}\n"
+                    f"IP cliente: {session.ip_cliente}"
+                )
+                session.fase = "ESCALADO"
+                await save_session(session)
+                await procesar_mensaje(phone, mensaje, bg)
+        return
+
+    # ── FASE: TROUBLESHOOTING (KPIs desde lista) ──────────
     elif session.fase == "TROUBLESHOOTING":
 
-        # 1. PROCESAR SELECCIÓN DE LISTA (KPI)
-        # Si el mensaje es un ID de la lista (ej: kpi_lento_todo)
-        if mensaje.startswith("kpi_"):
-            
-            # --- LÓGICA PREDEFINIDA (HARDCODED) PARA KPIs ---
-            if mensaje == "kpi_no_internet":
-                # Re-verificar estado de la ONT
-                ont_status = await so_get_ont_status(session.serial_ont) if session.serial_ont else None
-                estado = ont_status.get("status", "desconocido") if ont_status else "desconocido"
-                
-                if estado == "offline":
-                    # ONT offline → escalar directamente
-                    reply = "He verificado tu equipo y está sin señal. Voy a generar un ticket para que un técnico te visite."
-                    session.fase = "ESCALADO"  # ✅ Avanza la fase
-                else:
-                    # ONT online pero sin internet → pasos de troubleshooting
-                    reply = (
-                        "Tu equipo está conectado a nuestra red pero sin acceso a internet. "
-                        "Por favor intenta estos pasos:\n\n"
-                        "1️⃣ Apaga el router 30 segundos y enciéndelo\n"
-                        "2️⃣ Espera 2 minutos y prueba de nuevo\n\n"
-                        "¿Se resolvió tu problema? Responde *Sí* o *No*"
-                    )
-                    session.fase = "ESCALADO"  # ✅ O crea una fase "ESPERANDO_CONFIRMACION" si quieres más pasos
-                
-                session.pasos_realizados.append("kpi_no_internet")
-                await save_session(session)  # ✅ Guardar el cambio de fase
-                await wa_send_message(phone, reply)
-                return
-            
-            elif mensaje == "kpi_lento_todo":
-                reply = "Entendido, todo es lento. Voy a revisar si hay congestión en el nodo OLT."
-            
-            elif mensaje == "kpi_wifi_lento":
-                reply = "Problema de WiFi detectado. Te recomiendo reiniciar tu router o cambiar el canal a 1, 6 u 11."
-            
-            elif mensaje == "kpi_wifi_no_aparece":
-                reply = "Vamos a reiniciar el módulo WiFi de tu equipo. ¿Te gustaría que lo haga ahora?"
-            
-            elif mensaje == "kpi_lag":
-                reply = "El lag en juegos suele ser por estabilidad de WiFi. Intenta conectar con cable de red."
-
-            elif mensaje == "kpi_intermitente":
-                reply = "La conexión se corta indica posible inestabilidad en la fibra o el equipo. Voy a revisar su histórico."
-
-            elif mensaje == "kpi_tecnico":
-                # ESCALADO
-                session.fase = "ESCALADO"
-                reply = "Entendido. Generando ticket de visita técnica para usted. Un técnico se contactará pronto."
-                # Aquí iría tu lógica de creación de ticket mw_crear_ticket(...)
-            
-            # Enviamos la respuesta predefinida
-            await wa_send_message(phone, reply)
-            return # Terminamos el flujo aquí
-
-        # 2. SI EL USUARIO ESCRIBE TEXTO EN VEZ DE SELECCIONAR
-        # Si el usuario escribe "Hola" o "Gracias" después de ver el menú
-        if "menu_desplegado" in session.pasos_realizados:
-            # Opción A: Forzar al menú (Para obtener KPIs limpios)
-            await wa_send_message(phone, "Por favor, selecciona una opción de la lista anterior para que pueda registrar su falla en mi sistema.")
+        if not mensaje.startswith("kpi_"):
+            await wa_send_message(
+                phone,
+                "Por favor selecciona una opción de la lista para que pueda registrar tu falla correctamente. 🙏"
+            )
             return
-            
-            # Opción B: Pasar a la IA (Flexible - Descomentar si quieres permitir chat libre)
-            # prompt = f"El usuario dice: {mensaje}. Responde amablemente."
-            # reply = await call_glm(prompt, session, mensaje)
-            # await wa_send_message(phone, reply)
-            # return
+
+        session.pasos_realizados.append(mensaje)
+        session.kpi_activo = mensaje
+
+        # ── KPI: VELOCIDAD (lento_todo, wifi_lento, lag) → Reboot con explicación
+        if mensaje in ("kpi_lento_todo", "kpi_wifi_lento", "kpi_lag"):
+            session.destino_escalado = "TECNICO"
+            if session.serial_ont:
+                await wa_send_message(
+                    phone,
+                    "Para mejorar tu velocidad voy a reiniciar tu equipo remotamente. 🔄\n\n"
+                    "Es normal hacerlo *1-2 veces por semana* para limpiar la memoria del "
+                    "equipo y mantener la conexión estable, igual que reiniciar un celular.\n\n"
+                    "⚙️ Ejecutando reinicio... Por favor espera *2 minutos* sin tocar el router."
+                )
+                session.fase = "REBOOT_PENDIENTE"
+                await save_session(session)
+                bg.add_task(ejecutar_reboot_y_verificar, phone, session.serial_ont, session)
+            else:
+                session.fase = "ESCALADO"
+                session.datos_tecnicos = f"KPI: {mensaje}. Sin serial ONT disponible."
+                await save_session(session)
+                await procesar_mensaje(phone, mensaje, bg)
+            return
+
+        # ── KPI: NO INTERNET → Verificar estado ONT primero
+        elif mensaje == "kpi_no_internet":
+            session.destino_escalado = "TECNICO"
+            ont_status = await so_get_ont_status(session.serial_ont) if session.serial_ont else None
+            onu_status_str = ont_status.get("onu_status", "Offline") if ont_status else "Offline"
+
+            if onu_status_str.lower() in ("power fail", "los", "offline"):
+                # Estado crítico → escalar técnico directo
+                session.datos_tecnicos = (
+                    f"KPI: Sin internet.\n"
+                    f"Estado ONT al verificar: {onu_status_str}\n"
+                    f"Serial ONT: {session.serial_ont}\n"
+                    f"IP cliente: {session.ip_cliente}"
+                )
+                session.fase = "ESCALADO"
+                await save_session(session)
+                await procesar_mensaje(phone, mensaje, bg)
+            else:
+                # ONT online pero sin internet → hacer 2 preguntas
+                session.fase = "ESPERANDO_PREGUNTAS_NOINET"
+                session.pasos_realizados.append(f"ont_status_al_kpi:{onu_status_str}")
+                await save_session(session)
+                await wa_send_buttons(
+                    phone,
+                    "Tu equipo aparece conectado a nuestra red pero sin internet. "
+                    "Para ayudarte mejor: ¿Qué luces ves en tu equipo ahora mismo?",
+                    [
+                        {"id": "luces_ninguna",  "title": "🔴 Ninguna encendida"},
+                        {"id": "luces_roja",     "title": "🟠 Luz roja o parpadeando"},
+                        {"id": "luces_normal",   "title": "🟢 Luces normales"},
+                    ]
+                )
+            return
+
+        # ── KPI: INTERMITENTE → Full status + ping + escalar técnico
+        elif mensaje == "kpi_intermitente":
+            session.destino_escalado = "TECNICO"
+            await wa_send_message(
+                phone,
+                "Entendido. Voy a revisar los registros técnicos de tu equipo y hacer "
+                "pruebas de conectividad. Esto puede tomar unos segundos... ⏳"
+            )
+            raw = await so_get_full_status(session.serial_ont) if session.serial_ont else None
+            ping_res = await ejecutar_ping(session.ip_cliente) if session.ip_cliente else "IP no disponible"
+
+            if raw:
+                parsed = parsear_full_status(raw)
+                session.datos_tecnicos = formatear_datos_tecnicos(parsed, session.ip_cliente or "N/D", ping_res, mensaje)
+            else:
+                session.datos_tecnicos = f"KPI: {mensaje}.\nPing: {ping_res}\nSerial: {session.serial_ont}"
+
+            session.fase = "ESCALADO"
+            await save_session(session)
+            await procesar_mensaje(phone, mensaje, bg)
+            return
+
+        # ── KPI: DNS / NO CARGA PÁGINAS → Full status + ping + escalar NOC
+        elif mensaje == "kpi_dns":
+            session.destino_escalado = "NOC"
+            await wa_send_message(
+                phone,
+                "Entendido. Voy a revisar el estado de tu conexión WAN y hacer "
+                "pruebas de red. Un momento... ⏳"
+            )
+            raw = await so_get_full_status(session.serial_ont) if session.serial_ont else None
+            ping_res = await ejecutar_ping(session.ip_cliente) if session.ip_cliente else "IP no disponible"
+
+            if raw:
+                parsed = parsear_full_status(raw)
+                session.datos_tecnicos = formatear_datos_tecnicos(parsed, session.ip_cliente or "N/D", ping_res, mensaje)
+            else:
+                session.datos_tecnicos = f"KPI: {mensaje}.\nPing: {ping_res}\nSerial: {session.serial_ont}"
+
+            session.fase = "ESCALADO"
+            await save_session(session)
+            await procesar_mensaje(phone, mensaje, bg)
+            return
+
+        # ── KPI: WIFI NO APARECE → Escalar NOC directo
+        elif mensaje == "kpi_wifi_no_aparece":
+            session.destino_escalado = "NOC"
+            session.datos_tecnicos = (
+                f"KPI: Red WiFi no aparece en dispositivos del cliente.\n"
+                f"Serial ONT: {session.serial_ont}\n"
+                f"IP cliente: {session.ip_cliente}\n"
+                f"Requiere revisión remota de configuración WiFi por NOC."
+            )
+            session.fase = "ESCALADO"
+            await save_session(session)
+            await procesar_mensaje(phone, mensaje, bg)
+            return
+
+    # ── FASE: PREGUNTAS ADICIONALES KPI_NO_INTERNET ───────
+    elif session.fase == "ESPERANDO_PREGUNTAS_NOINET":
+
+        session.pasos_realizados.append(f"luces:{mensaje}")
+
+        # Primera pregunta respondida (luces) → hacer segunda pregunta
+        if mensaje.startswith("luces_"):
+            await save_session(session)
+            await wa_send_buttons(
+                phone,
+                "Gracias. Segunda pregunta: ¿Hubo algún corte de luz eléctrica antes de que se fuera el internet?",
+                [
+                    {"id": "corte_si", "title": "✅ Sí hubo corte"},
+                    {"id": "corte_no", "title": "❌ No hubo corte"},
+                ]
+            )
+            return
+
+        # Segunda pregunta respondida (corte de luz) → escalar con contexto
+        luces = next((p for p in session.pasos_realizados if p.startswith("luces:")), "luces:desconocido")
+        corte = "Sí" if mensaje == "corte_si" else "No"
+
+        session.datos_tecnicos = (
+            f"KPI: Sin acceso a internet (ONT aparece online).\n"
+            f"Luces del equipo: {luces.replace('luces:', '')}\n"
+            f"Corte de luz previo: {corte}\n"
+            f"Serial ONT: {session.serial_ont}\n"
+            f"IP cliente: {session.ip_cliente}"
+        )
+        session.destino_escalado = "TECNICO"
+        session.fase = "ESCALADO"
+        await save_session(session)
+        await procesar_mensaje(phone, mensaje, bg)
+        return
       
-    # ── FASE: ESCALADO A TÉCNICO ─────────────
+    # ── FASE: ESCALADO A TÉCNICO / NOC ───────────────────
     elif session.fase == "ESCALADO":
 
         kpi_labels = {
-            "kpi_no_internet": "Sin acceso a internet",
-            "kpi_lento_todo": "Internet lento en todos los dispositivos",
-            "kpi_wifi_lento": "WiFi lento",
-            "kpi_lag": "Lag en juegos online",
-            "kpi_intermitente": "Conexión intermitente / se corta",
-            "kpi_dns": "No carga páginas web",
-            "kpi_wifi_no_aparece": "Red WiFi no aparece",
-            "kpi_tecnico": "Solicitud directa de visita técnica",
+            "kpi_no_internet":         "Sin acceso a internet",
+            "kpi_lento_todo":          "Internet lento en todos los dispositivos",
+            "kpi_wifi_lento":          "WiFi lento",
+            "kpi_lag":                 "Lag en juegos online",
+            "kpi_intermitente":        "Conexión intermitente / se corta",
+            "kpi_dns":                 "No carga páginas web",
+            "kpi_wifi_no_aparece":     "Red WiFi no aparece",
+            "ont_offline_sin_causa_aparente": "ONT offline sin causa aparente",
+            "ont_offline_confirmado":  "ONT offline confirmado por cliente",
         }
-
-        problemas = [kpi_labels[p] for p in session.pasos_realizados if p in kpi_labels]
-        problema_texto = ", ".join(problemas) if problemas else "Falla de conectividad"
-        reboot_texto = "Sí, sin éxito" if session.reboot_ejecutado else "No fue necesario"
+        problema_texto = kpi_labels.get(session.kpi_activo or "", "Falla de conectividad")
         horario = extraer_horario(mensaje)
+        destino = session.destino_escalado or "TECNICO"
+        reboot_texto = "Sí, sin éxito" if session.reboot_ejecutado else "No fue necesario"
 
-        contenido = (
-            f"Reporte generado por ARIA (Soporte IA)\n\n"
+        contenido_ticket = (
+            f"Reporte generado por ARIA (Soporte IA)\n"
+            f"{'=' * 40}\n"
             f"Problema reportado: {problema_texto}\n"
             f"Serial ONT: {session.serial_ont or 'No disponible'}\n"
-            f"Reinicio remoto ejecutado: {reboot_texto}\n"
-            f"Atendido vía: WhatsApp\n"
-            f"Teléfono cliente: {phone}"
+            f"IP cliente: {session.ip_cliente or 'No disponible'}\n"
+            f"Reinicio remoto: {reboot_texto}\n"
+            f"Atendido via: WhatsApp\n"
+            f"Telefono: {phone}\n\n"
         )
+        if session.datos_tecnicos:
+            contenido_ticket += session.datos_tecnicos
 
         ticket_id = await mw_crear_ticket({
-            "cliente_id": session.id_cliente,
-            "asunto": f"Falla técnica: {problema_texto[:50]}",
-            "descripcion": contenido,
+            "cliente_id":  session.id_cliente,
+            "asunto":      f"Falla tecnica: {problema_texto[:50]}",
+            "descripcion": contenido_ticket,
             "solicitante": session.nombre or "Cliente",
-            "turno": horario,
-            "agendado": "VIA TELEFONICA",
+            "turno":       horario,
+            "agendado":    "VIA TELEFONICA",
         })
+
         session.ticket_id = ticket_id
 
-        prompt = PROMPT_ESCALADO_TECNICO.format(
-            nombre_cliente=session.nombre,
-            contrato=session.contrato,
-            plan="Plan registrado",
-            problema="Falla de conectividad",
-            estado_ont="Offline o degradado",
-            señal="Ver ticket",
-            reboot_ejecutado="Sí" if session.reboot_ejecutado else "No",
-            resultado_reboot="Sin éxito" if session.reboot_ejecutado else "No ejecutado",
-            pasos_realizados=", ".join(session.pasos_realizados),
-            horario_preferido=horario,
-            numero_ticket=ticket_id or "Pendiente"
+        # Mensaje al cliente
+        await wa_send_message(
+            phone,
+            f"He registrado tu caso con el ticket *#{ticket_id}*. 📋\n\n"
+            f"Un {'técnico' if destino == 'TECNICO' else 'especialista'} revisará tu caso "
+            f"y se pondrá en contacto contigo a la brevedad.\n\n"
+            f"Si tienes alguna consulta adicional puedes escribirnos aquí. 🙏"
         )
-        reply = await call_glm(prompt, session, mensaje)
 
-        # Notificar al técnico
-        if ticket_id:
-            msg_tecnico = MENSAJE_TECNICO_WHATSAPP.format(
-                numero_ticket=ticket_id,
-                nombre_cliente=session.nombre,
-                direccion="Ver MikroWisp",
-                telefono=phone,
-                plan="Ver MikroWisp",
-                problema="Falla de conectividad sin resolución remota",
-                estado_ont="Offline/Degradado",
-                señal="Ver SmartOLT",
-                reboot="Sí" if session.reboot_ejecutado else "No",
-                resultado_reboot="Sin éxito",
-                pasos_realizados="\n".join([f"• {p}" for p in session.pasos_realizados]),
-                horario=horario
+        # Notificar al técnico o NOC por WhatsApp
+        numero_destino = os.getenv("NOC_WHATSAPP") if destino == "NOC" else TECNICO_WHATSAPP
+        if ticket_id and numero_destino:
+            msg_destino = (
+                f"🔔 *NUEVO TICKET #{ticket_id}*\n"
+                f"{'=' * 30}\n"
+                f"👤 Cliente: {session.nombre}\n"
+                f"📋 Contrato: {session.contrato}\n"
+                f"📱 Teléfono: {phone}\n"
+                f"🔌 Serial ONT: {session.serial_ont or 'N/D'}\n"
+                f"🌐 IP: {session.ip_cliente or 'N/D'}\n"
+                f"⚠️ Problema: {problema_texto}\n"
+                f"🔄 Reboot remoto: {reboot_texto}\n"
+                f"🕐 Horario preferido: {horario}\n\n"
             )
-            await wa_send_message(TECNICO_WHATSAPP, msg_tecnico)
+            if session.datos_tecnicos:
+                msg_destino += f"📊 *DIAGNÓSTICO:*\n{session.datos_tecnicos}"
+            await wa_send_message(numero_destino, msg_destino)
 
         session.fase = "ESPERANDO_TECNICO"
         await save_session(session)
-        await wa_send_message(phone, reply)
         return
 
     # ── FASE: ENCUESTA CSAT ──────────────────
@@ -922,6 +1193,19 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
         await save_session(session)
         return
 
+    # ── FASE: ESPERANDO TÉCNICO ──────────────────────────
+    elif session.fase == "ESPERANDO_TECNICO":
+        prompt = (
+            f"El cliente {session.nombre} tiene el ticket #{session.ticket_id} activo y está esperando "
+            f"la visita o atención del {'técnico' if session.destino_escalado == 'TECNICO' else 'equipo NOC'}. "
+            f"Ahora pregunta: '{mensaje}'. "
+            f"Responde amablemente, confirma que su ticket está registrado, NO prometas horarios específicos "
+            f"y anímalo a tener paciencia. Sé breve."
+        )
+        reply = await call_glm(prompt, session, mensaje)
+        await wa_send_message(phone, reply)
+        return
+
     # ── FASE: DEFAULT ─────────────────────────
     else:
         await wa_send_message(phone, "Tu caso está siendo atendido. Si tienes alguna consulta adicional, escríbenos. 🙏")
@@ -942,37 +1226,51 @@ async def ejecutar_reboot_y_verificar(phone: str, serial: str, session: SessionS
     if not exito:
         session.fase = "TROUBLESHOOTING"
         await save_session(session)
-        await wa_send_message(phone, "No pude ejecutar el reinicio remoto en este momento. Voy a guiarte para que lo hagas manualmente.")
+        await wa_send_message(phone, "No pude ejecutar el reinicio remoto en este momento. Por favor intenta apagar y encender tu equipo manualmente, espera 2 minutos y escríbenos si el problema persiste.")
         return
 
     await wa_send_message(phone, "⚙️ Reiniciando tu equipo remotamente... Por favor espera 2 minutos sin tocar el router.")
-    await asyncio.sleep(ISP_CONFIG["reboot_wait_seconds"])
+    await asyncio.sleep(ISP_CONFIG.get("reboot_wait_seconds", 120))
 
     # Verificar estado post-reinicio
     ont_post = await so_get_ont_status(serial)
     señal_post = await so_get_signal(serial)
 
-    estado_post = ont_post.get("status", "offline") if ont_post else "offline"
-    señal_val = señal_post.get("rx_power") if señal_post else None
+    estado_post = ont_post.get("onu_status", "Offline").lower() if ont_post else "offline"
+    señal_val = None
+    if señal_post:
+        try:
+            señal_val = float(señal_post.get("rx_power", 0))
+        except (ValueError, TypeError):
+            señal_val = None
 
-    señal_ok = (
-        señal_val is not None and
-        ISP_CONFIG["señal_maxima_dbm"] >= float(señal_val) >= ISP_CONFIG["señal_minima_dbm"]
-    )
-
-    prompt = PROMPT_POST_REBOOT.format(
-        estado_ont_post=estado_post,
-        señal_post=señal_val or "N/A"
-    )
-    reply = await call_glm(prompt, session, mensaje)
+    SEÑAL_MIN = ISP_CONFIG.get("señal_minima_dbm", -27.0)
+    SEÑAL_MAX = ISP_CONFIG.get("señal_maxima_dbm", -8.0)
+    señal_ok = señal_val is not None and (SEÑAL_MAX >= señal_val >= SEÑAL_MIN)
 
     if estado_post == "online" and señal_ok:
         session.fase = "CSAT"
+        await save_session(session)
+        await wa_send_message(
+            phone,
+            f"✅ ¡Tu equipo se reinició correctamente y la señal está estable ({señal_val} dBm)!\n\n"
+            f"Por favor prueba tu internet. ¿Se resolvió el problema?"
+        )
     else:
         session.fase = "ESCALADO"
-
-    await save_session(session)
-    await wa_send_message(phone, reply)
+        session.datos_tecnicos = (
+            f"Reboot remoto ejecutado.\n"
+            f"Estado post-reboot: {estado_post}\n"
+            f"Señal post-reboot: {señal_val or 'N/D'} dBm\n"
+            f"KPI original: {session.kpi_activo or 'velocidad'}"
+        )
+        await save_session(session)
+        await wa_send_message(
+            phone,
+            "El reinicio se ejecutó pero tu equipo no logró estabilizarse. "
+            "Voy a escalar tu caso para que un técnico lo revise. 🔧"
+        )
+        await procesar_mensaje(phone, "escalando_post_reboot", None)
 
 
 # ─────────────────────────────────────────────
@@ -987,12 +1285,13 @@ def extraer_contrato(texto: str) -> Optional[str]:
 
 
 def extraer_horario(texto: str) -> str:
+    """Detecta preferencia de horario en el texto. Retorna MAÑANA o TARDE para MikroWisp."""
     texto_lower = texto.lower()
     if any(p in texto_lower for p in ["mañana", "manana", "am", "8", "9", "10", "11"]):
-        return "MAÑANA"   # ✅ Antes: "Mañana (8am - 12pm)"
+        return "MAÑANA"
     if any(p in texto_lower for p in ["tarde", "pm", "1", "2", "3", "4", "5"]):
-        return "TARDE"    # ✅ Antes: "Tarde (1pm - 5pm)"
-    return "MAÑANA"       # ✅ Default válido en vez de "A coordinar con el técnico"
+        return "TARDE"
+    return "MAÑANA"
 
 
 def detectar_frustracion(texto: str) -> bool:
@@ -1068,7 +1367,7 @@ async def recibir_mensaje(request: Request, bg: BackgroundTasks):
                 list_reply_id = interactive_data["list_reply"]["id"]
                 
                 # Convertimos ese ID en el "mensaje" para que el flujo principal lo procese
-                texto = list_reply_id
+                mensaje = list_reply_id
                 
                 # OPCIONAL: Log temporal para ver que funciona antes de conectar la DB
                 logger.info(f"KPI SELECCIONADO: {list_reply_id}") 
@@ -1076,7 +1375,7 @@ async def recibir_mensaje(request: Request, bg: BackgroundTasks):
             # CASO B: Viene de BOTONES (Confirmaciones, CSAT)
             elif tipo_interactivo == "button_reply":
                 button_id = interactive_data["button_reply"]["id"]
-                texto = button_id.replace("csat_", "")
+                mensaje = button_id.replace("csat_", "")
             
             else:
                 return JSONResponse({"status": "interactive_type_not_supported"})
