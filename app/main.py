@@ -1,7 +1,7 @@
 """
 =============================================================
   ISP AI SUPPORT SYSTEM — BACKEND PRINCIPAL
-  FastAPI + GLM 4.7-Flash + MikroWisp + SmartOLT
+  FastAPI + GLM 4.5-Air (httpx directo) + MikroWisp + SmartOLT
 =============================================================
   Archivo: main.py
   Descripción: Servidor principal, webhooks y orquestación
@@ -9,7 +9,7 @@
 
 Instalación de dependencias:
   pip install fastapi uvicorn httpx redis sqlalchemy
-              alembic psycopg2-binary zhipuai pydantic
+              alembic psycopg2-binary pydantic
               python-dotenv celery
 
 Ejecutar:
@@ -40,37 +40,6 @@ from prompts import (
 )
 
 # ─────────────────────────────────────────────
-# CONFIGURACIÓN CLIENTE IA (Z.AI CODING PLAN)
-# ─────────────────────────────────────────────
-
-async def call_glm(prompt, session, raw_user_message, temperatura=0.7):
-    headers = {
-        "Authorization": f"Bearer {os.getenv('GLM_API_KEY')}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": "GLM-4.5-Air",
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT.format(**ISP_CONFIG)},
-            *session.historial[-10:],
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": temperatura,
-        "max_tokens": 2000
-    }
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        r = await client.post(
-            "https://api.z.ai/api/coding/paas/v4/chat/completions",
-            json=payload,
-            headers=headers
-        )
-        reply = r.json()["choices"][0]["message"]["content"]
-        if raw_user_message and isinstance(raw_user_message, str):
-            session.historial.append({"role": "user", "content": raw_user_message})
-            session.historial.append({"role": "assistant", "content": reply})
-        return reply
-
-# ─────────────────────────────────────────────
 # CONFIGURACIÓN
 # ─────────────────────────────────────────────
 
@@ -84,9 +53,8 @@ logging.getLogger("uvicorn").setLevel(logging.INFO)
 
 app = FastAPI(title="ISP AI Support System", version="1.0.0")
 
-# Clientes de servicios externos
-# glm_client = ZhipuAI(api_key=os.getenv("GLM_API_KEY"))
 GLM_API_KEY = os.getenv("GLM_API_KEY")
+GLM_BASE_URL = "https://api.z.ai/api/coding/paas/v4/chat/completions"
 redis_client: aioredis.Redis = None
 
 MIKROWISP_BASE = os.getenv("MIKROWISP_API_URL")       # ej: https://tu-mikrowisp.com/api/v1
@@ -207,8 +175,7 @@ async def call_glm(
     temperatura: float = 0.7
 ) -> str:
     """
-    Llama a Z.AI (OpenAI Compatible / Z.AI).
-    Separa el historial real de los prompts técnicos.
+    Llama a Z.AI usando httpx directo (sin SDK openai/zhipuai).
     """
     system = SYSTEM_PROMPT.format(**ISP_CONFIG)
 
@@ -216,16 +183,24 @@ async def call_glm(
     messages.extend(session.historial[-10:])
     messages.append({"role": "user", "content": prompt})
 
-    try:
-        response = await glm_client.chat.completions.create(
-            model="GLM-4.5-Air",
-            messages=messages,
-            temperature=temperatura,
-            max_tokens=2000
-        )
-        reply = response.choices[0].message.content
+    headers = {
+        "Authorization": f"Bearer {GLM_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "GLM-4.5-Air",
+        "messages": messages,
+        "temperature": temperatura,
+        "max_tokens": 2000
+    }
 
-        # Solo guardar en historial si raw_user_message es un string válido
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(GLM_BASE_URL, json=payload, headers=headers)
+            r.raise_for_status()
+            data = r.json()
+            reply = data["choices"][0]["message"]["content"]
+
         if raw_user_message and isinstance(raw_user_message, str):
             session.historial.append({"role": "user", "content": raw_user_message})
             session.historial.append({"role": "assistant", "content": reply})
