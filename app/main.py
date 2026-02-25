@@ -1026,7 +1026,7 @@ async def recibir_mensaje(request: Request, bg: BackgroundTasks):
                 list_reply_id = interactive_data["list_reply"]["id"]
                 
                 # Convertimos ese ID en el "mensaje" para que el flujo principal lo procese
-                mensaje = list_reply_id
+                texto = list_reply_id
                 
                 # OPCIONAL: Log temporal para ver que funciona antes de conectar la DB
                 logger.info(f"KPI SELECCIONADO: {list_reply_id}") 
@@ -1034,7 +1034,7 @@ async def recibir_mensaje(request: Request, bg: BackgroundTasks):
             # CASO B: Viene de BOTONES (Confirmaciones, CSAT)
             elif tipo_interactivo == "button_reply":
                 button_id = interactive_data["button_reply"]["id"]
-                mensaje = button_id.replace("csat_", "")
+                texto = button_id.replace("csat_", "")
             
             else:
                 return JSONResponse({"status": "interactive_type_not_supported"})
