@@ -1421,34 +1421,29 @@ async def recibir_mensaje(request: Request, bg: BackgroundTasks):
         msg_type = msg.get("type")
 
         # Extraer texto según tipo de mensaje
+        texto = None
         if msg_type == "text":
             texto = msg["text"]["body"]
         elif msg_type == "interactive":
             interactive_data = msg.get("interactive", {})
             tipo_interactivo = interactive_data.get("type")
             
-            # CASO A: Viene de una LISTA (Selección de KPI)
             if tipo_interactivo == "list_reply":
-                # El ID es lo que definimos en el paso 1 (ej: "kpi_no_internet")
                 list_reply_id = interactive_data["list_reply"]["id"]
-                
-                # Convertimos ese ID en el "mensaje" para que el flujo principal lo procese
-                mensaje = list_reply_id
-                
-                # OPCIONAL: Log temporal para ver que funciona antes de conectar la DB
-                logger.info(f"KPI SELECCIONADO: {list_reply_id}") 
+                texto = list_reply_id
+                logger.info(f"KPI SELECCIONADO: {list_reply_id}")
 
-            # CASO B: Viene de BOTONES (Confirmaciones, CSAT)
             elif tipo_interactivo == "button_reply":
                 button_id = interactive_data["button_reply"]["id"]
-                mensaje = button_id.replace("csat_", "")
+                texto = button_id.replace("csat_", "")
             
             else:
                 return JSONResponse({"status": "interactive_type_not_supported"})
 
-        logger.info(f"📱 Mensaje de {phone}: {texto[:50]}")
+        if not texto:
+            return JSONResponse({"status": "no_text"})
 
-        # Procesar en background para responder rápido a Meta
+        logger.info(f"📱 Mensaje de {phone}: {texto[:50]}")
         bg.add_task(procesar_mensaje, phone, texto, bg)
         return JSONResponse({"status": "ok"})
 
