@@ -70,6 +70,9 @@ VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
 TECNICO_WHATSAPP = os.getenv("TECNICO_WHATSAPP_NUMBER")
 NOC_WHATSAPP = os.getenv("NOC_WHATSAPP")
 WHATSAPP_PHONE_ID_TECNICOS = os.getenv("WHATSAPP_PHONE_ID_TECNICOS")
+ADMIN_WHATSAPP = os.getenv("ADMIN_WHATSAPP")
+GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "1l3slGc2fvWNvHKWFmnXRLZe0VZZPDL4m")
+GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "/app/credentials.json")
 
 # ─────────────────────────────────────────────
 # CONFIGURACIÓN CELERY  <--- PEGA EL CÓDIGO AQUÍ
@@ -126,9 +129,52 @@ class SessionState(BaseModel):
     updated_at: str = ""
 
 
-# ─────────────────────────────────────────────
-# GESTIÓN DE SESIONES (Redis)
-# ─────────────────────────────────────────────
+class TecnicoSession(BaseModel):
+    """Estado de la sesión de un técnico en campo"""
+    phone: str
+    nombre: str = "Técnico"
+    fase: str = "IDLE"
+    # Datos del ticket asignado
+    ticket_id: Optional[str] = None
+    cliente_phone: Optional[str] = None
+    cliente_nombre: Optional[str] = None
+    cliente_direccion: Optional[str] = None
+    problema: Optional[str] = None
+    # Timeline (ISO timestamps)
+    ts_asignado: Optional[str] = None
+    ts_confirmado: Optional[str] = None
+    ts_en_camino: Optional[str] = None
+    ts_llegada: Optional[str] = None
+    ts_cierre: Optional[str] = None
+    # Datos de cierre (recopilados pregunta por pregunta)
+    falla: Optional[str] = None
+    solucion: Optional[str] = None
+    materiales: Optional[str] = None
+    fotos: list = []
+    updated_at: str = ""
+
+
+async def get_tecnico_session(phone: str) -> Optional[TecnicoSession]:
+    """Obtiene la sesión activa de un técnico desde Redis"""
+    data = await redis_client.get(f"tecnico_session:{phone}")
+    if data:
+        return TecnicoSession(**json.loads(data))
+    return None
+
+
+async def save_tecnico_session(session: TecnicoSession):
+    """Guarda la sesión del técnico en Redis con TTL de 8h"""
+    session.updated_at = datetime.now().isoformat()
+    try:
+        data = session.model_dump_json()
+    except Exception:
+        data = json.dumps(session.dict())
+    await redis_client.setex(f"tecnico_session:{session.phone}", 8 * 3600, data)
+
+
+async def clear_tecnico_session(phone: str):
+    """Limpia la sesión del técnico al finalizar"""
+    await redis_client.delete(f"tecnico_session:{phone}")
 
 async def get_session(phone: str) -> SessionState:
     """Obtiene o crea la sesión de un cliente desde Redis"""
@@ -334,26 +380,26 @@ async def mw_crear_ticket(datos: dict) -> Optional[str]:
     return None
 
 
-async def mw_cerrar_ticket(ticket_id: str, resolucion: str):
-    """Cierra un ticket en MikroWisp con la descripción de resolución"""
-    headers = {
-        "Authorization": f"Bearer {MIKROWISP_TOKEN}",
-        "Content-Type": "application/json"
-    }
+async def mw_cerrar_ticket(ticket_id: str, motivo: str):
+    """Cierra un ticket en MikroWisp usando /CloseTicket"""
+    headers = {"Content-Type": "application/json"}
     payload = {
-        "estado": "cerrado",
-        "resolucion": resolucion,
-        "fecha_cierre": datetime.now().isoformat()
+        "token":         MIKROWISP_TOKEN,
+        "idticket":      int(ticket_id),
+        "motivo_cierre": motivo,
     }
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
-            await client.put(
-                f"{MIKROWISP_BASE}/tickets/{ticket_id}",
+            r = await client.post(
+                f"{MIKROWISP_BASE}/CloseTicket",
                 json=payload,
                 headers=headers
             )
+            logger.info(f"MikroWisp CloseTicket status: {r.status_code} - {r.text}")
+            return r.status_code == 200
         except Exception as e:
             logger.error(f"Error MikroWisp cerrar_ticket: {e}")
+    return False
 
 
 # ─────────────────────────────────────────────
@@ -1324,23 +1370,34 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
             f"Si tienes alguna consulta adicional puedes escribirnos aquí. 🙏"
         )
 
-        # Notificar al técnico o NOC por WhatsApp
+        # Notificar al técnico con flujo completo (T-02 en adelante)
         if ticket_id and numero_destino:
-            msg_destino = (
-                f"🔔 *NUEVO TICKET #{ticket_id}*\n"
-                f"{'=' * 30}\n"
-                f"👤 Cliente: {session.nombre}\n"
-                f"📋 Contrato: {session.contrato}\n"
-                f"📱 Teléfono: {phone}\n"
-                f"🔌 Serial ONT: {session.serial_ont or 'N/D'}\n"
-                f"🌐 IP: {session.ip_cliente or 'N/D'}\n"
-                f"⚠️ Problema: {problema_texto}\n"
-                f"🔄 Reboot remoto: {reboot_texto}\n"
-                f"🕐 Horario preferido: {horario}\n\n"
-            )
-            if session.datos_tecnicos:
-                msg_destino += f"📊 *DIAGNÓSTICO:*\n{session.datos_tecnicos}"
-            await wa_send_message_tecnico_con_fallback(numero_destino, msg_destino)
+            if destino == "TECNICO":
+                await notificar_ticket_a_tecnico(
+                    tecnico_phone=numero_destino,
+                    ticket_id=ticket_id,
+                    cliente_phone=phone,
+                    cliente_nombre=session.nombre or "Cliente",
+                    cliente_direccion=session.contrato or "Ver MikroWisp",
+                    problema=problema_texto,
+                    serial_ont=session.serial_ont or "N/D",
+                    ip_cliente=session.ip_cliente or "N/D",
+                    datos_tecnicos=session.datos_tecnicos or ""
+                )
+            else:
+                # NOC — envío simple sin flujo de cierre
+                msg_noc = (
+                    f"🔔 *NUEVO TICKET #{ticket_id} → NOC*\n"
+                    f"{'─' * 30}\n"
+                    f"👤 Cliente: {session.nombre}\n"
+                    f"📱 Teléfono: {phone}\n"
+                    f"🔌 Serial ONT: {session.serial_ont or 'N/D'}\n"
+                    f"🌐 IP: {session.ip_cliente or 'N/D'}\n"
+                    f"⚠️ Problema: {problema_texto}\n"
+                )
+                if session.datos_tecnicos:
+                    msg_noc += f"\n📊 *Diagnóstico:*\n{session.datos_tecnicos}"
+                await wa_send_message_tecnico_con_fallback(numero_destino, msg_noc)
 
         session.fase = "ESPERANDO_TECNICO"
         await save_session(session)
@@ -1492,6 +1549,543 @@ async def ejecutar_reboot_y_verificar(phone: str, serial: str, session: SessionS
 
 
 
+
+# ─────────────────────────────────────────────
+# GOOGLE DRIVE — Subida de fotos de evidencia
+# ─────────────────────────────────────────────
+
+async def subir_foto_drive(image_data: bytes, filename: str) -> Optional[str]:
+    """
+    Sube una imagen a Google Drive y retorna el link público.
+    Usa la cuenta de servicio del credentials.json.
+    """
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaInMemoryUpload
+        import io
+
+        creds = service_account.Credentials.from_service_account_file(
+            GOOGLE_CREDENTIALS_PATH,
+            scopes=["https://www.googleapis.com/auth/drive"]
+        )
+        service = build("drive", "v3", credentials=creds)
+
+        media = MediaInMemoryUpload(image_data, mimetype="image/jpeg", resumable=False)
+        file_meta = {
+            "name": filename,
+            "parents": [GOOGLE_DRIVE_FOLDER_ID]
+        }
+        uploaded = service.files().create(
+            body=file_meta,
+            media_body=media,
+            fields="id"
+        ).execute()
+
+        file_id = uploaded.get("id")
+
+        # Hacer el archivo público
+        service.permissions().create(
+            fileId=file_id,
+            body={"type": "anyone", "role": "reader"}
+        ).execute()
+
+        link = f"https://drive.google.com/file/d/{file_id}/view"
+        logger.info(f"[DRIVE] Foto subida: {filename} → {link}")
+        return link
+
+    except Exception as e:
+        logger.error(f"[DRIVE] Error subiendo foto: {e}")
+        return None
+
+
+# ─────────────────────────────────────────────
+# AUTORIZACIÓN DE TÉCNICOS
+# ─────────────────────────────────────────────
+
+TECNICOS_KEY = "tecnicos_autorizados"
+
+
+async def get_tecnicos() -> dict:
+    """Obtiene el dict de técnicos autorizados desde Redis"""
+    raw = await redis_client.get(TECNICOS_KEY)
+    return json.loads(raw) if raw else {}
+
+
+async def save_tecnicos(tecnicos: dict):
+    """Guarda el dict de técnicos autorizados en Redis (sin TTL)"""
+    await redis_client.set(TECNICOS_KEY, json.dumps(tecnicos))
+
+
+async def es_tecnico_autorizado(phone: str) -> bool:
+    tecnicos = await get_tecnicos()
+    return phone in tecnicos and tecnicos[phone].get("activo", False)
+
+
+async def procesar_comando_admin(phone: str, texto: str):
+    """Procesa comandos del administrador para gestionar técnicos"""
+    if phone != ADMIN_WHATSAPP:
+        return False
+
+    partes = texto.strip().split()
+    cmd = partes[0].lower() if partes else ""
+
+    if cmd == "!addtec" and len(partes) >= 3:
+        numero = partes[1]
+        nombre = " ".join(partes[2:])
+        tecnicos = await get_tecnicos()
+        tecnicos[numero] = {"nombre": nombre, "activo": True}
+        await save_tecnicos(tecnicos)
+        await wa_send_message_tecnico(phone, f"✅ Técnico agregado:\n{nombre} → {numero}")
+        return True
+
+    elif cmd == "!deltec" and len(partes) >= 2:
+        numero = partes[1]
+        tecnicos = await get_tecnicos()
+        if numero in tecnicos:
+            del tecnicos[numero]
+            await save_tecnicos(tecnicos)
+            await wa_send_message_tecnico(phone, f"✅ Técnico eliminado: {numero}")
+        else:
+            await wa_send_message_tecnico(phone, f"⚠️ Número no encontrado: {numero}")
+        return True
+
+    elif cmd == "!listec":
+        tecnicos = await get_tecnicos()
+        if not tecnicos:
+            await wa_send_message_tecnico(phone, "📋 No hay técnicos registrados.")
+        else:
+            lineas = ["📋 *Técnicos autorizados:*\n"]
+            for num, datos in tecnicos.items():
+                estado = "✅ Activo" if datos.get("activo") else "❌ Inactivo"
+                lineas.append(f"• {datos.get('nombre')} — {num} — {estado}")
+            await wa_send_message_tecnico(phone, "\n".join(lineas))
+        return True
+
+    return False
+
+
+# ─────────────────────────────────────────────
+# NOTIFICACIÓN AL TÉCNICO CON DATOS DEL TICKET
+# ─────────────────────────────────────────────
+
+async def notificar_ticket_a_tecnico(
+    tecnico_phone: str,
+    ticket_id: str,
+    cliente_phone: str,
+    cliente_nombre: str,
+    cliente_direccion: str,
+    problema: str,
+    serial_ont: str,
+    ip_cliente: str,
+    datos_tecnicos: str
+):
+    """Envía el brief del ticket al técnico y crea su sesión."""
+
+    # Crear sesión del técnico
+    tecnicos = await get_tecnicos()
+    nombre_tecnico = tecnicos.get(tecnico_phone, {}).get("nombre", "Técnico")
+
+    sesion = TecnicoSession(
+        phone=tecnico_phone,
+        nombre=nombre_tecnico,
+        fase="ESPERANDO_CONFIRMACION",
+        ticket_id=ticket_id,
+        cliente_phone=cliente_phone,
+        cliente_nombre=cliente_nombre,
+        cliente_direccion=cliente_direccion,
+        problema=problema,
+        ts_asignado=datetime.now().isoformat(),
+    )
+    await save_tecnico_session(sesion)
+
+    mensaje = (
+        f"🔔 *NUEVO TICKET #{ticket_id}*\n"
+        f"{'─' * 30}\n"
+        f"👤 Cliente: {cliente_nombre}\n"
+        f"📍 Dirección: {cliente_direccion}\n"
+        f"📱 Teléfono: {cliente_phone}\n"
+        f"🔌 Serial ONT: {serial_ont or 'N/D'}\n"
+        f"🌐 IP: {ip_cliente or 'N/D'}\n"
+        f"⚠️ Problema: {problema}\n"
+    )
+    if datos_tecnicos:
+        mensaje += f"\n📊 *Diagnóstico:*\n{datos_tecnicos}"
+
+    await wa_send_message_tecnico_con_fallback(tecnico_phone, mensaje)
+
+    # Enviar botones de confirmación
+    await wa_send_buttons_tecnico(
+        tecnico_phone,
+        "¿Puedes atender este ticket?",
+        [
+            {"id": f"tec_si_{ticket_id}", "title": "✅ Sí, voy"},
+            {"id": f"tec_no_{ticket_id}", "title": "❌ No puedo"},
+        ]
+    )
+
+
+async def wa_send_buttons_tecnico(to: str, body: str, buttons: list):
+    """Envía botones interactivos desde el número de técnicos"""
+    phone_id = WHATSAPP_PHONE_ID_TECNICOS or WHATSAPP_PHONE_ID
+    url = f"https://graph.facebook.com/v19.0/{phone_id}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {"text": body},
+            "action": {
+                "buttons": [
+                    {"type": "reply", "reply": {"id": b["id"], "title": b["title"]}}
+                    for b in buttons[:3]
+                ]
+            }
+        }
+    }
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            r = await client.post(url, json=payload, headers=headers)
+            logger.info(f"[WA_TECNICO_BTN] to={to} | status={r.status_code}")
+        except Exception as e:
+            logger.error(f"Error botones técnico: {e}")
+
+
+# ─────────────────────────────────────────────
+# FLUJO TÉCNICO — Procesador de mensajes
+# ─────────────────────────────────────────────
+
+def calcular_ttr(ts_inicio: str, ts_fin: str) -> str:
+    """Calcula el tiempo de resolución entre dos ISO timestamps"""
+    try:
+        inicio = datetime.fromisoformat(ts_inicio)
+        fin = datetime.fromisoformat(ts_fin)
+        delta = fin - inicio
+        total = int(delta.total_seconds())
+        horas = total // 3600
+        minutos = (total % 3600) // 60
+        if horas > 0:
+            return f"{horas}h {minutos}min"
+        return f"{minutos}min"
+    except Exception:
+        return "N/D"
+
+
+def construir_motivo_cierre(sesion: TecnicoSession) -> str:
+    """Construye el texto completo para motivo_cierre de CloseTicket"""
+    ahora = datetime.now().isoformat()
+
+    def fmt(ts):
+        if not ts:
+            return "N/D"
+        try:
+            return datetime.fromisoformat(ts).strftime("%d/%m/%Y %H:%M")
+        except Exception:
+            return ts
+
+    ttr_total = calcular_ttr(sesion.ts_asignado, ahora) if sesion.ts_asignado else "N/D"
+    ttr_sitio = calcular_ttr(sesion.ts_llegada, ahora) if sesion.ts_llegada else "N/D"
+
+    fotos_texto = "\n".join([f"  {i+1}. {url}" for i, url in enumerate(sesion.fotos)]) if sesion.fotos else "  Sin evidencias"
+
+    return (
+        f"=== REPORTE DE CIERRE — ARIA Bot ===\n\n"
+        f"TIMELINE\n"
+        f"  Ticket asignado:    {fmt(sesion.ts_asignado)}\n"
+        f"  Técnico confirmó:   {fmt(sesion.ts_confirmado)}\n"
+        f"  En camino:          {fmt(sesion.ts_en_camino)}\n"
+        f"  Llegada domicilio:  {fmt(sesion.ts_llegada)}\n"
+        f"  Cierre:             {fmt(ahora)}\n"
+        f"  TTR total:          {ttr_total}\n"
+        f"  Tiempo en sitio:    {ttr_sitio}\n\n"
+        f"DIAGNÓSTICO\n"
+        f"  Tipo de falla:      {sesion.falla or 'N/D'}\n"
+        f"  Solución aplicada:  {sesion.solucion or 'N/D'}\n"
+        f"  Materiales usados:  {sesion.materiales or 'Ninguno'}\n\n"
+        f"EVIDENCIAS\n{fotos_texto}\n\n"
+        f"Técnico: {sesion.nombre} ({sesion.phone})\n"
+        f"Cerrado por: ARIA Bot (automático)"
+    )
+
+
+async def procesar_mensaje_tecnico(phone: str, msg: dict, bg: BackgroundTasks):
+    """
+    Procesador principal del flujo técnico.
+    Maneja comandos admin, autorización, y fases T-02 a T-05.
+    """
+    msg_type = msg.get("type")
+    texto = None
+    image_data = None
+    image_filename = None
+
+    # Extraer contenido según tipo
+    if msg_type == "text":
+        texto = msg["text"]["body"].strip()
+    elif msg_type == "interactive":
+        interactive = msg.get("interactive", {})
+        if interactive.get("type") == "button_reply":
+            texto = interactive["button_reply"]["id"]
+    elif msg_type == "image":
+        # Descargar imagen desde WhatsApp
+        image_id = msg.get("image", {}).get("id")
+        if image_id:
+            image_data, image_filename = await descargar_imagen_wa(image_id, phone)
+
+    if not texto and not image_data:
+        return
+
+    logger.info(f"📟 Técnico {phone}: {texto or '[imagen]'}")
+
+    # ── COMANDOS ADMIN ──────────────────────────
+    if texto and texto.startswith("!"):
+        await procesar_comando_admin(phone, texto)
+        return
+
+    # ── VERIFICAR AUTORIZACIÓN ──────────────────
+    autorizado = await es_tecnico_autorizado(phone)
+    if not autorizado:
+        # Registrar ventana y avisar
+        await redis_client.setex(f"ventana_tecnico:{phone}", 24 * 3600, "1")
+        await wa_send_message_tecnico(
+            phone,
+            "⛔ Número no autorizado.\nContacta al administrador para obtener acceso al sistema."
+        )
+        logger.warning(f"[TECNICO] Acceso no autorizado: {phone}")
+        return
+
+    # ── REGISTRAR VENTANA ACTIVA ─────────────────
+    await redis_client.setex(f"ventana_tecnico:{phone}", 24 * 3600, "1")
+
+    # ── ENTREGAR PENDIENTES si los hay ──────────
+    await entregar_tickets_pendientes(phone)
+
+    # ── OBTENER SESIÓN ACTIVA ────────────────────
+    sesion = await get_tecnico_session(phone)
+
+    # Sin sesión activa
+    if not sesion or sesion.fase == "IDLE":
+        await wa_send_message_tecnico(
+            phone,
+            "✅ Estás activo en el sistema. Te notificaré los próximos tickets en tiempo real.\n\n"
+            "Comandos disponibles:\n"
+            "  !tickets — ver tickets pendientes (próximamente)"
+        )
+        return
+
+    # ── FASE: ESPERANDO CONFIRMACIÓN (T-02) ──────
+    if sesion.fase == "ESPERANDO_CONFIRMACION":
+        ticket_id = sesion.ticket_id
+
+        if texto and texto.startswith(f"tec_si_{ticket_id}"):
+            sesion.fase = "EN_CAMINO"
+            sesion.ts_confirmado = datetime.now().isoformat()
+            sesion.ts_en_camino = datetime.now().isoformat()
+            await save_tecnico_session(sesion)
+
+            await wa_send_message_tecnico(phone, f"✅ Confirmado. ¡Buen trabajo! Avísame cuando llegues al domicilio.")
+            await wa_send_buttons_tecnico(
+                phone,
+                "Toca el botón cuando estés en el domicilio del cliente:",
+                [{"id": f"tec_llegue_{ticket_id}", "title": "📍 Llegué al domicilio"}]
+            )
+
+            # Notificar al cliente
+            if sesion.cliente_phone:
+                await wa_send_message(
+                    sesion.cliente_phone,
+                    f"🚗 Buenas noticias, {sesion.cliente_nombre}!\n\n"
+                    f"Tu técnico *{sesion.nombre}* ya está en camino a tu domicilio.\n"
+                    f"Te avisaré cuando llegue. 🙏"
+                )
+
+        elif texto and texto.startswith(f"tec_no_{ticket_id}"):
+            sesion.fase = "IDLE"
+            await save_tecnico_session(sesion)
+            await wa_send_message_tecnico(phone, "Entendido. El ticket será reasignado.")
+            logger.warning(f"[TECNICO] {phone} rechazó ticket #{ticket_id}")
+
+        return
+
+    # ── FASE: EN CAMINO → CHECK-IN DOMICILIO (T-03) ──
+    if sesion.fase == "EN_CAMINO":
+        ticket_id = sesion.ticket_id
+
+        if texto and texto.startswith(f"tec_llegue_{ticket_id}"):
+            sesion.fase = "EN_DOMICILIO"
+            sesion.ts_llegada = datetime.now().isoformat()
+            await save_tecnico_session(sesion)
+
+            await wa_send_message_tecnico(
+                phone,
+                f"📍 Check-in registrado.\n\n"
+                f"Cuando termines el trabajo escríbeme *listo* para iniciar el cierre del ticket."
+            )
+
+            # Notificar al cliente
+            if sesion.cliente_phone:
+                await wa_send_message(
+                    sesion.cliente_phone,
+                    f"📍 ¡Tu técnico *{sesion.nombre}* acaba de llegar a tu domicilio!\n\n"
+                    f"En breve comenzará a revisar tu equipo. 🔧"
+                )
+        return
+
+    # ── FASE: EN DOMICILIO → ESPERAR "listo" (T-04 inicio) ──
+    if sesion.fase == "EN_DOMICILIO":
+        if texto and texto.lower() in ("listo", "termine", "terminé", "finalice", "finalicé", "done"):
+            sesion.fase = "CIERRE_P1"
+            await save_tecnico_session(sesion)
+            await wa_send_message_tecnico(
+                phone,
+                "¡Perfecto! Voy a registrar el cierre del ticket.\n\n"
+                "*Pregunta 1 de 3:*\n¿Qué tipo de falla encontraste?\n"
+                "_(ej: fibra cortada, ONT dañada, conector sucio, configuración)_"
+            )
+        return
+
+    # ── FASE: CIERRE P1 — Tipo de falla ──────────
+    if sesion.fase == "CIERRE_P1":
+        sesion.falla = texto
+        sesion.fase = "CIERRE_P2"
+        await save_tecnico_session(sesion)
+        await wa_send_message_tecnico(
+            phone,
+            f"Anotado ✅\n\n"
+            f"*Pregunta 2 de 3:*\n¿Qué solución aplicaste?\n"
+            f"_(ej: reemplazo de ONT, limpieza de conector, empalme de fibra)_"
+        )
+        return
+
+    # ── FASE: CIERRE P2 — Solución ───────────────
+    if sesion.fase == "CIERRE_P2":
+        sesion.solucion = texto
+        sesion.fase = "CIERRE_P3"
+        await save_tecnico_session(sesion)
+        await wa_send_message_tecnico(
+            phone,
+            f"Anotado ✅\n\n"
+            f"*Pregunta 3 de 3:*\n¿Usaste materiales o repuestos?\n"
+            f"_(ej: 1x ONT Huawei EG8145X6, 2m fibra SC/APC — o escribe 'ninguno')_"
+        )
+        return
+
+    # ── FASE: CIERRE P3 — Materiales ─────────────
+    if sesion.fase == "CIERRE_P3":
+        sesion.materiales = texto
+        sesion.fase = "CIERRE_FOTOS"
+        await save_tecnico_session(sesion)
+        await wa_send_message_tecnico(
+            phone,
+            f"Anotado ✅\n\n"
+            f"*Último paso:*\nEnvía las fotos de evidencia del trabajo realizado.\n"
+            f"Puedes enviar *una o varias fotos*.\n"
+            f"Cuando termines de enviar todas, escribe *fin fotos*."
+        )
+        return
+
+    # ── FASE: CIERRE FOTOS — Recibir imágenes ────
+    if sesion.fase == "CIERRE_FOTOS":
+
+        # Recibir foto
+        if image_data and image_filename:
+            link = await subir_foto_drive(image_data, image_filename)
+            if link:
+                sesion.fotos.append(link)
+                await save_tecnico_session(sesion)
+                await wa_send_message_tecnico(
+                    phone,
+                    f"📷 Foto {len(sesion.fotos)} recibida ✅\nEnvía más fotos o escribe *fin fotos* para cerrar."
+                )
+            else:
+                await wa_send_message_tecnico(phone, "⚠️ No pude subir esa foto. Intenta enviarla de nuevo.")
+            return
+
+        # Cerrar con fotos
+        if texto and texto.lower() in ("fin fotos", "fin", "listo", "ya", "eso es todo"):
+            sesion.fase = "CERRANDO"
+            sesion.ts_cierre = datetime.now().isoformat()
+            await save_tecnico_session(sesion)
+
+            motivo = construir_motivo_cierre(sesion)
+            exito = await mw_cerrar_ticket(sesion.ticket_id, motivo)
+
+            if exito:
+                ttr = calcular_ttr(sesion.ts_asignado, sesion.ts_cierre)
+                await wa_send_message_tecnico(
+                    phone,
+                    f"✅ *Ticket #{sesion.ticket_id} cerrado exitosamente*\n\n"
+                    f"📋 Falla: {sesion.falla}\n"
+                    f"🔧 Solución: {sesion.solucion}\n"
+                    f"🧰 Materiales: {sesion.materiales}\n"
+                    f"📷 Fotos: {len(sesion.fotos)}\n"
+                    f"⏱ TTR total: {ttr}\n\n"
+                    f"¡Gracias por tu trabajo! 💪"
+                )
+
+                # Notificar al cliente y lanzar CSAT
+                if sesion.cliente_phone:
+                    await wa_send_message(
+                        sesion.cliente_phone,
+                        f"✅ ¡Tu servicio ha sido restaurado, {sesion.cliente_nombre}!\n\n"
+                        f"El técnico *{sesion.nombre}* completó el trabajo en tu domicilio.\n"
+                        f"Por favor verifica que tu internet esté funcionando. 🌐"
+                    )
+                    # Lanzar CSAT del cliente
+                    cliente_session = await get_session(sesion.cliente_phone)
+                    cliente_session.fase = "CSAT"
+                    cliente_session.ticket_id = sesion.ticket_id
+                    await save_session(cliente_session)
+
+            else:
+                await wa_send_message_tecnico(
+                    phone,
+                    f"⚠️ Hubo un problema al cerrar el ticket en el sistema.\n"
+                    f"Por favor ciérralo manualmente en MikroWisp (#{sesion.ticket_id})."
+                )
+
+            await clear_tecnico_session(phone)
+        return
+
+
+async def descargar_imagen_wa(image_id: str, tecnico_phone: str) -> tuple:
+    """Descarga una imagen de WhatsApp y retorna (bytes, filename)"""
+    phone_id = WHATSAPP_PHONE_ID_TECNICOS or WHATSAPP_PHONE_ID
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            # Paso 1: Obtener URL de descarga
+            r = await client.get(
+                f"https://graph.facebook.com/v19.0/{image_id}",
+                headers=headers
+            )
+            if r.status_code != 200:
+                logger.error(f"[DRIVE] Error obteniendo URL imagen: {r.text}")
+                return None, None
+
+            url_imagen = r.json().get("url")
+            if not url_imagen:
+                return None, None
+
+            # Paso 2: Descargar la imagen
+            r2 = await client.get(url_imagen, headers=headers)
+            if r2.status_code != 200:
+                return None, None
+
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"ticket_evidencia_{tecnico_phone}_{ts}.jpg"
+            return r2.content, filename
+
+        except Exception as e:
+            logger.error(f"[DRIVE] Error descargando imagen: {e}")
+            return None, None
+
+
 # ─────────────────────────────────────────────
 # WEBHOOK WHATSAPP
 # ─────────────────────────────────────────────
@@ -1537,10 +2131,10 @@ async def recibir_mensaje(request: Request, bg: BackgroundTasks):
             phone_number_id_recibido == WHATSAPP_PHONE_ID_TECNICOS
         )
 
-        # Si es mensaje al número de técnicos → entregar pendientes y no procesar flujo cliente
+        # Si es mensaje al número de técnicos → flujo técnico
         if es_mensaje_tecnico:
             logger.info(f"📟 Técnico {phone} escribió al número de técnicos")
-            bg.add_task(entregar_tickets_pendientes, phone)
+            bg.add_task(procesar_mensaje_tecnico, phone, msg, bg)
             return JSONResponse({"status": "ok_tecnico"})
 
         # Extraer texto según tipo de mensaje
