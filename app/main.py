@@ -2111,6 +2111,12 @@ async def recibir_mensaje(request: Request, bg: BackgroundTasks):
         value = changes.get("value", {})
 
         messages = value.get("messages", [])
+        statuses = value.get("statuses", [])
+
+        # Ignorar eventos de estado (sent, delivered, read)
+        if statuses and not messages:
+            return JSONResponse({"status": "status_update_ignored"})
+
         if not messages:
             return JSONResponse({"status": "no_messages"})
 
