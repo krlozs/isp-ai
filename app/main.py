@@ -71,8 +71,6 @@ TECNICO_WHATSAPP = os.getenv("TECNICO_WHATSAPP_NUMBER")
 NOC_WHATSAPP = os.getenv("NOC_WHATSAPP")
 WHATSAPP_PHONE_ID_TECNICOS = os.getenv("WHATSAPP_PHONE_ID_TECNICOS")
 ADMIN_WHATSAPP = os.getenv("ADMIN_WHATSAPP")
-GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "1l3slGc2fvWNvHKWFmnXRLZe0VZZPDL4m")
-GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "/app/credentials.json")
 
 # ─────────────────────────────────────────────
 # CONFIGURACIÓN CELERY  <--- PEGA EL CÓDIGO AQUÍ
@@ -1551,51 +1549,43 @@ async def ejecutar_reboot_y_verificar(phone: str, serial: str, session: SessionS
 
 
 # ─────────────────────────────────────────────
-# GOOGLE DRIVE — Subida de fotos de evidencia
+# CLOUDINARY — Subida de fotos de evidencia
 # ─────────────────────────────────────────────
 
 async def subir_foto_drive(image_data: bytes, filename: str) -> Optional[str]:
     """
-    Sube una imagen a Google Drive y retorna el link público.
-    Usa la cuenta de servicio del credentials.json.
+    Sube una imagen a Cloudinary y retorna la URL pública.
+    Nombre de función mantenido para compatibilidad con el resto del código.
     """
     try:
-        from google.oauth2 import service_account
-        from googleapiclient.discovery import build
-        from googleapiclient.http import MediaInMemoryUpload
-        import io
+        import cloudinary
+        import cloudinary.uploader
+        import base64
 
-        creds = service_account.Credentials.from_service_account_file(
-            GOOGLE_CREDENTIALS_PATH,
-            scopes=["https://www.googleapis.com/auth/drive"]
+        cloudinary.config(
+            cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME"),
+            api_key    = os.getenv("CLOUDINARY_API_KEY"),
+            api_secret = os.getenv("CLOUDINARY_API_SECRET"),
+            secure     = True
         )
-        service = build("drive", "v3", credentials=creds)
 
-        media = MediaInMemoryUpload(image_data, mimetype="image/jpeg", resumable=False)
-        file_meta = {
-            "name": filename,
-            "parents": [GOOGLE_DRIVE_FOLDER_ID]
-        }
-        uploaded = service.files().create(
-            body=file_meta,
-            media_body=media,
-            fields="id"
-        ).execute()
+        # Subir desde bytes via base64
+        b64 = base64.b64encode(image_data).decode("utf-8")
+        data_uri = f"data:image/jpeg;base64,{b64}"
 
-        file_id = uploaded.get("id")
+        public_id = filename.replace(".jpg", "").replace(".jpeg", "")
+        result = cloudinary.uploader.upload(
+            data_uri,
+            public_id=f"evidencias_tecnicos/{public_id}",
+            overwrite=True
+        )
 
-        # Hacer el archivo público
-        service.permissions().create(
-            fileId=file_id,
-            body={"type": "anyone", "role": "reader"}
-        ).execute()
-
-        link = f"https://drive.google.com/file/d/{file_id}/view"
-        logger.info(f"[DRIVE] Foto subida: {filename} → {link}")
-        return link
+        url = result.get("secure_url")
+        logger.info(f"[CLOUDINARY] Foto subida: {filename} → {url}")
+        return url
 
     except Exception as e:
-        logger.error(f"[DRIVE] Error subiendo foto: {e}")
+        logger.error(f"[CLOUDINARY] Error subiendo foto: {e}")
         return None
 
 
