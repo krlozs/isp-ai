@@ -1552,7 +1552,7 @@ async def ejecutar_reboot_y_verificar(phone: str, serial: str, session: SessionS
 # CLOUDINARY — Subida de fotos de evidencia
 # ─────────────────────────────────────────────
 
-async def subir_foto_drive(image_data: bytes, filename: str) -> Optional[str]:
+async def subir_foto_drive(image_data: bytes, filename: str, ticket_id: str = None) -> Optional[str]:
     """
     Sube una imagen a Cloudinary y retorna la URL pública.
     Nombre de función mantenido para compatibilidad con el resto del código.
@@ -1561,6 +1561,7 @@ async def subir_foto_drive(image_data: bytes, filename: str) -> Optional[str]:
         import cloudinary
         import cloudinary.uploader
         import base64
+        import uuid
 
         cloudinary.config(
             cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME"),
@@ -1569,19 +1570,24 @@ async def subir_foto_drive(image_data: bytes, filename: str) -> Optional[str]:
             secure     = True
         )
 
-        # Subir desde bytes via base64
+        # Nombre único con ticket_id + uuid para evitar sobreescritura
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        uid = str(uuid.uuid4())[:8]
+        ticket_str = f"ticket_{ticket_id}_" if ticket_id else ""
+        public_id = f"evidencias_tecnicos/{ticket_str}{ts}_{uid}"
+
         b64 = base64.b64encode(image_data).decode("utf-8")
         data_uri = f"data:image/jpeg;base64,{b64}"
 
-        public_id = filename.replace(".jpg", "").replace(".jpeg", "")
         result = cloudinary.uploader.upload(
             data_uri,
-            public_id=f"evidencias_tecnicos/{public_id}",
-            overwrite=True
+            public_id=public_id,
+            overwrite=False,
+            resource_type="image"
         )
 
         url = result.get("secure_url")
-        logger.info(f"[CLOUDINARY] Foto subida: {filename} → {url}")
+        logger.info(f"[CLOUDINARY] Foto subida: {public_id} → {url}")
         return url
 
     except Exception as e:
@@ -1988,7 +1994,7 @@ async def procesar_mensaje_tecnico(phone: str, msg: dict, bg: BackgroundTasks):
 
         # Recibir foto
         if image_data and image_filename:
-            link = await subir_foto_drive(image_data, image_filename)
+            link = await subir_foto_drive(image_data, image_filename, sesion.ticket_id)
             if link:
                 sesion.fotos.append(link)
                 await save_tecnico_session(sesion)
