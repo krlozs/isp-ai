@@ -43,6 +43,7 @@ services:
       - easypanel
     volumes:
       - media-files:/app/media
+      - ./app/credentials.json:/app/interlan-488522-e0e49e38aacc.json:ro
 
   # ── CELERY WORKER (Tareas en background) ───────────────────
   celery:
