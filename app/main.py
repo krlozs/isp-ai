@@ -1891,7 +1891,7 @@ async def procesar_mensaje_tecnico(phone: str, msg: dict, bg: BackgroundTasks):
             await wa_send_buttons_tecnico(
                 phone,
                 "Toca el botón cuando estés en el domicilio del cliente:",
-                [{"id": f"tec_llegue_{ticket_id}", "title": "📍 Llegué al domicilio"}]
+                [{"id": f"tec_llegue_{ticket_id}", "title": "Llegué al domicilio"}]
             )
 
             # Notificar al cliente
@@ -1923,7 +1923,12 @@ async def procesar_mensaje_tecnico(phone: str, msg: dict, bg: BackgroundTasks):
             await wa_send_message_tecnico(
                 phone,
                 f"📍 Check-in registrado.\n\n"
-                f"Cuando termines el trabajo escríbeme *listo* para iniciar el cierre del ticket."
+                f"Cuando termines el trabajo presiona el botón para iniciar el cierre del ticket."
+            )
+            await wa_send_buttons_tecnico(
+                phone,
+                f"¿Terminaste el trabajo en el ticket #{ticket_id}?",
+                [{"id": f"tec_listo_{ticket_id}", "title": "Trabajo terminado"}]
             )
 
             # Notificar al cliente
@@ -1935,9 +1940,9 @@ async def procesar_mensaje_tecnico(phone: str, msg: dict, bg: BackgroundTasks):
                 )
         return
 
-    # ── FASE: EN DOMICILIO → ESPERAR "listo" (T-04 inicio) ──
+    # ── FASE: EN DOMICILIO → ESPERAR BOTÓN "Trabajo terminado" (T-04 inicio) ──
     if sesion.fase == "EN_DOMICILIO":
-        if texto and texto.lower() in ("listo", "termine", "terminé", "finalice", "finalicé", "done"):
+        if texto and texto.startswith(f"tec_listo_{sesion.ticket_id}"):
             sesion.fase = "CIERRE_P1"
             await save_tecnico_session(sesion)
             await wa_send_message_tecnico(
