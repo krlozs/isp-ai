@@ -1574,10 +1574,11 @@ async def subir_foto_drive(image_data: bytes, filename: str, ticket_id: str = No
         uid = str(uuid.uuid4())[:8]
         ticket_str = ticket_id or "sin_ticket"
 
-        # Estructura jerárquica: evidencias_tecnicos/ticket_228/archivo
-        carpeta = f"evidencias_tecnicos/ticket_{ticket_str}"
+        # En Dynamic folder mode se usa asset_folder para la carpeta
+        # y public_id solo para el nombre del archivo
+        asset_folder = f"evidencias_tecnicos/ticket_{ticket_str}"
         prefijo = "video" if es_video else "foto"
-        public_id = f"{carpeta}/{prefijo}_{ts}_{uid}"
+        public_id = f"{prefijo}_{ts}_{uid}"
 
         b64 = base64.b64encode(image_data).decode("utf-8")
 
@@ -1586,9 +1587,9 @@ async def subir_foto_drive(image_data: bytes, filename: str, ticket_id: str = No
             result = cloudinary.uploader.upload(
                 data_uri,
                 public_id=public_id,
+                asset_folder=asset_folder,
                 resource_type="video",
                 overwrite=False,
-                # Optimización: reducir calidad y resolución
                 eager=[{
                     "quality": "auto:low",
                     "width": 1280,
@@ -1599,7 +1600,6 @@ async def subir_foto_drive(image_data: bytes, filename: str, ticket_id: str = No
                 }],
                 eager_async=False
             )
-            # Usar versión optimizada si está disponible
             eager = result.get("eager", [])
             url = eager[0].get("secure_url") if eager else result.get("secure_url")
         else:
@@ -1607,6 +1607,7 @@ async def subir_foto_drive(image_data: bytes, filename: str, ticket_id: str = No
             result = cloudinary.uploader.upload(
                 data_uri,
                 public_id=public_id,
+                asset_folder=asset_folder,
                 resource_type="image",
                 overwrite=False,
                 quality="auto:good",
