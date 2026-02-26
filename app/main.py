@@ -710,7 +710,6 @@ async def entregar_tickets_pendientes(numero_tecnico: str):
         raw = await redis_client.get(key)
         if not raw:
             logger.info(f"[PENDIENTE] Sin pendientes para {numero_tecnico}")
-            await wa_send_message_tecnico(numero_tecnico, "✅ Estás activo. Te notificaré los próximos tickets en tiempo real.")
             return
 
         pendientes = json.loads(raw)
