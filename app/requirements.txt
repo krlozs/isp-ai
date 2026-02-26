@@ -11,6 +11,4 @@ python-dotenv==1.0.1
 celery==5.4.0
 python-multipart==0.0.9
 pillow==10.4.0
-google-api-python-client
-google-auth
 cloudinary
