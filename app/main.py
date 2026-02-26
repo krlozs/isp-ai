@@ -1863,14 +1863,8 @@ async def procesar_mensaje_tecnico(phone: str, msg: dict, bg: BackgroundTasks):
     # ── OBTENER SESIÓN ACTIVA ────────────────────
     sesion = await get_tecnico_session(phone)
 
-    # Sin sesión activa
+    # Sin sesión activa — no responder nada
     if not sesion or sesion.fase == "IDLE":
-        await wa_send_message_tecnico(
-            phone,
-            "✅ Estás activo en el sistema. Te notificaré los próximos tickets en tiempo real.\n\n"
-            "Comandos disponibles:\n"
-            "  !tickets — ver tickets pendientes (próximamente)"
-        )
         return
 
     # ── FASE: ESPERANDO CONFIRMACIÓN (T-02) ──────
