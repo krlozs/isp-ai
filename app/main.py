@@ -149,6 +149,7 @@ class TecnicoSession(BaseModel):
     solucion: Optional[str] = None
     materiales: Optional[str] = None
     fotos: list = []
+    video_subido: bool = False  # Solo se permite 1 video
     updated_at: str = ""
 
 
@@ -1548,13 +1549,13 @@ async def ejecutar_reboot_y_verificar(phone: str, serial: str, session: SessionS
 
 
 # ─────────────────────────────────────────────
-# CLOUDINARY — Subida de fotos de evidencia
+# CLOUDINARY — Subida de fotos y videos de evidencia
 # ─────────────────────────────────────────────
 
-async def subir_foto_drive(image_data: bytes, filename: str, ticket_id: str = None) -> Optional[str]:
+async def subir_foto_drive(image_data: bytes, filename: str, ticket_id: str = None, es_video: bool = False) -> Optional[str]:
     """
-    Sube una imagen a Cloudinary y retorna la URL pública.
-    Nombre de función mantenido para compatibilidad con el resto del código.
+    Sube imagen o video a Cloudinary con estructura de carpetas por ticket.
+    Carpeta: evidencias_tecnicos/ticket_{id}/archivo
     """
     try:
         import cloudinary
@@ -1569,28 +1570,55 @@ async def subir_foto_drive(image_data: bytes, filename: str, ticket_id: str = No
             secure     = True
         )
 
-        # Nombre único con ticket_id + uuid para evitar sobreescritura
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         uid = str(uuid.uuid4())[:8]
-        ticket_str = f"ticket_{ticket_id}_" if ticket_id else ""
-        public_id = f"evidencias_tecnicos/{ticket_str}{ts}_{uid}"
+        ticket_str = ticket_id or "sin_ticket"
+
+        # Estructura jerárquica: evidencias_tecnicos/ticket_228/archivo
+        carpeta = f"evidencias_tecnicos/ticket_{ticket_str}"
+        prefijo = "video" if es_video else "foto"
+        public_id = f"{carpeta}/{prefijo}_{ts}_{uid}"
 
         b64 = base64.b64encode(image_data).decode("utf-8")
-        data_uri = f"data:image/jpeg;base64,{b64}"
 
-        result = cloudinary.uploader.upload(
-            data_uri,
-            public_id=public_id,
-            overwrite=False,
-            resource_type="image"
-        )
+        if es_video:
+            data_uri = f"data:video/mp4;base64,{b64}"
+            result = cloudinary.uploader.upload(
+                data_uri,
+                public_id=public_id,
+                resource_type="video",
+                overwrite=False,
+                # Optimización: reducir calidad y resolución
+                eager=[{
+                    "quality": "auto:low",
+                    "width": 1280,
+                    "height": 720,
+                    "crop": "limit",
+                    "format": "mp4",
+                    "video_codec": "h264"
+                }],
+                eager_async=False
+            )
+            # Usar versión optimizada si está disponible
+            eager = result.get("eager", [])
+            url = eager[0].get("secure_url") if eager else result.get("secure_url")
+        else:
+            data_uri = f"data:image/jpeg;base64,{b64}"
+            result = cloudinary.uploader.upload(
+                data_uri,
+                public_id=public_id,
+                resource_type="image",
+                overwrite=False,
+                quality="auto:good",
+                fetch_format="auto"
+            )
+            url = result.get("secure_url")
 
-        url = result.get("secure_url")
-        logger.info(f"[CLOUDINARY] Foto subida: {public_id} → {url}")
+        logger.info(f"[CLOUDINARY] {'Video' if es_video else 'Foto'} subida: {public_id} → {url}")
         return url
 
     except Exception as e:
-        logger.error(f"[CLOUDINARY] Error subiendo foto: {e}")
+        logger.error(f"[CLOUDINARY] Error subiendo {'video' if es_video else 'foto'}: {e}")
         return None
 
 
@@ -1817,6 +1845,7 @@ async def procesar_mensaje_tecnico(phone: str, msg: dict, bg: BackgroundTasks):
     texto = None
     image_data = None
     image_filename = None
+    es_video = False
 
     # Extraer contenido según tipo
     if msg_type == "text":
@@ -1826,10 +1855,15 @@ async def procesar_mensaje_tecnico(phone: str, msg: dict, bg: BackgroundTasks):
         if interactive.get("type") == "button_reply":
             texto = interactive["button_reply"]["id"]
     elif msg_type == "image":
-        # Descargar imagen desde WhatsApp
         image_id = msg.get("image", {}).get("id")
         if image_id:
             image_data, image_filename = await descargar_imagen_wa(image_id, phone)
+            es_video = False
+    elif msg_type == "video":
+        video_id = msg.get("video", {}).get("id")
+        if video_id:
+            image_data, image_filename = await descargar_imagen_wa(video_id, phone, es_video=True)
+            es_video = True
 
     if not texto and not image_data:
         return
@@ -1976,27 +2010,55 @@ async def procesar_mensaje_tecnico(phone: str, msg: dict, bg: BackgroundTasks):
         await wa_send_message_tecnico(
             phone,
             f"Anotado ✅\n\n"
-            f"*Último paso:*\nEnvía las fotos de evidencia del trabajo realizado.\n"
-            f"Puedes enviar *una o varias fotos*.\n"
-            f"Cuando termines de enviar todas, escribe *fin fotos*."
+            f"*Último paso:*\nEnvía las fotos y/o video de evidencia.\n"
+            f"• Fotos: ilimitadas\n"
+            f"• Video: máximo 1\n"
+            f"Cuando termines escribe *fin fotos*."
         )
         return
 
-    # ── FASE: CIERRE FOTOS — Recibir imágenes ────
+    # ── FASE: CIERRE FOTOS — Recibir imágenes y video ────
     if sesion.fase == "CIERRE_FOTOS":
 
-        # Recibir foto
+        # Recibir imagen o video
         if image_data and image_filename:
-            link = await subir_foto_drive(image_data, image_filename, sesion.ticket_id)
-            if link:
-                sesion.fotos.append(link)
-                await save_tecnico_session(sesion)
-                await wa_send_message_tecnico(
-                    phone,
-                    f"📷 Foto {len(sesion.fotos)} recibida ✅\nEnvía más fotos o escribe *fin fotos* para cerrar."
-                )
+
+            # Control límite de video
+            if es_video:
+                if sesion.video_subido:
+                    await wa_send_message_tecnico(
+                        phone,
+                        "⚠️ Solo se permite *1 video* por ticket. El video no fue guardado.\nPuedes seguir enviando fotos o escribe *fin fotos* para cerrar."
+                    )
+                    return
+                link = await subir_foto_drive(image_data, image_filename, sesion.ticket_id, es_video=True)
+                if link:
+                    sesion.fotos.append(link)
+                    sesion.video_subido = True
+                    await save_tecnico_session(sesion)
+                    fotos_count = len([f for f in sesion.fotos if "/foto_" in f])
+                    await wa_send_message_tecnico(
+                        phone,
+                        f"🎥 Video recibido ✅\n"
+                        f"Fotos: {fotos_count} | Video: 1\n"
+                        f"Envía más fotos o escribe *fin fotos* para cerrar."
+                    )
+                else:
+                    await wa_send_message_tecnico(phone, "⚠️ No pude subir el video. Intenta enviarlo de nuevo.")
             else:
-                await wa_send_message_tecnico(phone, "⚠️ No pude subir esa foto. Intenta enviarla de nuevo.")
+                link = await subir_foto_drive(image_data, image_filename, sesion.ticket_id, es_video=False)
+                if link:
+                    sesion.fotos.append(link)
+                    await save_tecnico_session(sesion)
+                    fotos_count = len([f for f in sesion.fotos if "/foto_" in f])
+                    video_txt = " | Video: 1" if sesion.video_subido else ""
+                    await wa_send_message_tecnico(
+                        phone,
+                        f"📷 Foto {fotos_count} recibida ✅{video_txt}\n"
+                        f"Envía más fotos o escribe *fin fotos* para cerrar."
+                    )
+                else:
+                    await wa_send_message_tecnico(phone, "⚠️ No pude subir esa foto. Intenta enviarla de nuevo.")
             return
 
         # Cerrar con fotos
@@ -2046,37 +2108,35 @@ async def procesar_mensaje_tecnico(phone: str, msg: dict, bg: BackgroundTasks):
         return
 
 
-async def descargar_imagen_wa(image_id: str, tecnico_phone: str) -> tuple:
-    """Descarga una imagen de WhatsApp y retorna (bytes, filename)"""
-    phone_id = WHATSAPP_PHONE_ID_TECNICOS or WHATSAPP_PHONE_ID
+async def descargar_imagen_wa(media_id: str, tecnico_phone: str, es_video: bool = False) -> tuple:
+    """Descarga una imagen o video de WhatsApp y retorna (bytes, filename)"""
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=60.0) as client:
         try:
-            # Paso 1: Obtener URL de descarga
             r = await client.get(
-                f"https://graph.facebook.com/v19.0/{image_id}",
+                f"https://graph.facebook.com/v19.0/{media_id}",
                 headers=headers
             )
             if r.status_code != 200:
-                logger.error(f"[DRIVE] Error obteniendo URL imagen: {r.text}")
+                logger.error(f"[CLOUDINARY] Error obteniendo URL media: {r.text}")
                 return None, None
 
-            url_imagen = r.json().get("url")
-            if not url_imagen:
+            url_media = r.json().get("url")
+            if not url_media:
                 return None, None
 
-            # Paso 2: Descargar la imagen
-            r2 = await client.get(url_imagen, headers=headers)
+            r2 = await client.get(url_media, headers=headers)
             if r2.status_code != 200:
                 return None, None
 
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"ticket_evidencia_{tecnico_phone}_{ts}.jpg"
+            ext = "mp4" if es_video else "jpg"
+            filename = f"{'video' if es_video else 'foto'}_{tecnico_phone}_{ts}.{ext}"
             return r2.content, filename
 
         except Exception as e:
-            logger.error(f"[DRIVE] Error descargando imagen: {e}")
+            logger.error(f"[CLOUDINARY] Error descargando media: {e}")
             return None, None
 
 
