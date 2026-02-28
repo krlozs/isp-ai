@@ -23,11 +23,19 @@ import asyncio
 import logging
 from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import httpx
 import redis.asyncio as aioredis
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
+
+# Zona horaria Lima
+LIMA_TZ = ZoneInfo("America/Lima")
+
+def now_lima() -> datetime:
+    """Retorna la fecha/hora actual en zona horaria America/Lima."""
+    return datetime.now(LIMA_TZ)
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from celery import Celery
@@ -116,6 +124,7 @@ class SessionState(BaseModel):
     plan: Optional[str] = None
     serial_ont: Optional[str] = None
     ip_cliente: Optional[str] = None      # IP del servicio para ping
+    direccion: Optional[str] = None       # Dirección del cliente
     ticket_id: Optional[str] = None
     kpi_activo: Optional[str] = None      # KPI seleccionado actualmente
     datos_tecnicos: Optional[str] = None  # Resultados técnicos para el ticket
@@ -163,7 +172,7 @@ async def get_tecnico_session(phone: str) -> Optional[TecnicoSession]:
 
 async def save_tecnico_session(session: TecnicoSession):
     """Guarda la sesión del técnico en Redis con TTL de 8h"""
-    session.updated_at = datetime.now().isoformat()
+    session.updated_at = now_lima().isoformat()
     try:
         data = session.model_dump_json()
     except Exception:
@@ -183,8 +192,8 @@ async def get_session(phone: str) -> SessionState:
 
     session = SessionState(
         phone=phone,
-        created_at=datetime.now().isoformat(),
-        updated_at=datetime.now().isoformat()
+        created_at=now_lima().isoformat(),
+        updated_at=now_lima().isoformat()
     )
     await save_session(session)
     return session
@@ -192,7 +201,7 @@ async def get_session(phone: str) -> SessionState:
 
 async def save_session(session: SessionState):
     """Guarda la sesión en Redis con TTL de 30 minutos"""
-    session.updated_at = datetime.now().isoformat()
+    session.updated_at = now_lima().isoformat()
     try:
         # Pydantic v2
         data = session.model_dump_json()
@@ -849,7 +858,7 @@ async def guardar_ticket_pendiente(numero_tecnico: str, mensaje: str):
         pendientes = json.loads(raw) if raw else []
         pendientes.append({
             "mensaje": mensaje,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": now_lima().isoformat()
         })
         # Guardar con TTL de 48h
         await redis_client.setex(key, 48 * 3600, json.dumps(pendientes))
@@ -1097,6 +1106,7 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
         session.contrato = contrato
         session.id_cliente = str(cliente.get("id"))
         session.nombre = cliente.get("nombre")
+        session.direccion = cliente.get("direccion_principal") or "Sin dirección registrada"
 
         # --- LÓGICA PARA MÚLTIPLES SERVICIOS CON SN INDIVIDUAL ---
         servicios = cliente.get("servicios", [])
@@ -1493,25 +1503,30 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
         reboot_texto = "Sí, sin éxito" if session.reboot_ejecutado else "No fue necesario"
 
         contenido_ticket = (
-            f"Reporte generado por ARIA (Soporte IA)\n"
-            f"{'=' * 40}\n"
-            f"Problema reportado: {problema_texto}\n"
-            f"Serial ONT: {session.serial_ont or 'No disponible'}\n"
-            f"IP cliente: {session.ip_cliente or 'No disponible'}\n"
-            f"Reinicio remoto: {reboot_texto}\n"
-            f"Atendido via: WhatsApp\n"
-            f"Telefono: {phone}\n\n"
+            f"<h2>📋 Reporte generado por ARIA (Soporte IA)</h2>"
+            f"<table>"
+            f"<tr><td><b>Problema reportado:</b></td><td>{problema_texto}</td></tr>"
+            f"<tr><td><b>Cliente:</b></td><td>{session.nombre or 'N/D'}</td></tr>"
+            f"<tr><td><b>Teléfono:</b></td><td>{phone}</td></tr>"
+            f"<tr><td><b>Dirección:</b></td><td>{session.direccion or 'N/D'}</td></tr>"
+            f"<tr><td><b>Serial ONT:</b></td><td>{session.serial_ont or 'N/D'}</td></tr>"
+            f"<tr><td><b>IP cliente:</b></td><td>{session.ip_cliente or 'N/D'}</td></tr>"
+            f"<tr><td><b>Reinicio remoto:</b></td><td>{reboot_texto}</td></tr>"
+            f"<tr><td><b>Canal:</b></td><td>WhatsApp</td></tr>"
+            f"</table>"
         )
         if session.datos_tecnicos:
-            contenido_ticket += session.datos_tecnicos
+            contenido_ticket += f"<br><h3>📊 Diagnóstico técnico</h3><pre>{session.datos_tecnicos}</pre>"
 
         ticket_id = await mw_crear_ticket({
-            "cliente_id":  session.id_cliente,
-            "asunto":      f"Falla tecnica: {problema_texto[:50]}",
-            "descripcion": contenido_ticket,
-            "solicitante": session.nombre or "Cliente",
-            "turno":       horario,
-            "agendado":    "VIA TELEFONICA",
+            "cliente_id":    session.id_cliente,
+            "asunto":        f"Falla tecnica: {problema_texto[:50]}",
+            "descripcion":   contenido_ticket,
+            "kpi":           session.kpi_activo or "",
+            "datos_tecnicos": session.datos_tecnicos or "",
+            "solicitante":   session.nombre or "Cliente",
+            "turno":         horario,
+            "agendado":      "VIA TELEFONICA",
         })
 
         session.ticket_id = ticket_id
@@ -1535,7 +1550,7 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
                     ticket_id=ticket_id,
                     cliente_phone=phone,
                     cliente_nombre=session.nombre or "Cliente",
-                    cliente_direccion=session.contrato or "Ver MikroWisp",
+                    cliente_direccion=session.direccion or "Ver MikroWisp",
                     problema=problema_texto,
                     serial_ont=session.serial_ont or "N/D",
                     ip_cliente=session.ip_cliente or "N/D",
@@ -1566,10 +1581,17 @@ async def procesar_mensaje(phone: str, mensaje: str, bg: BackgroundTasks):
         # Si recibimos la calificación (1-5)
         if mensaje.strip() in ["1", "2", "3", "4", "5"]:
             calificacion = int(mensaje.strip())
-            # TODO: Guardar en PostgreSQL
             logger.info(f"CSAT recibido: {calificacion} - Cliente: {phone}")
             if session.ticket_id:
-                await mw_cerrar_ticket(session.ticket_id, f"Resuelto. CSAT: {calificacion}/5")
+                estrellas = "⭐" * calificacion
+                await glpi_agregar_followup(
+                    session.ticket_id,
+                    f"<h3>📊 Encuesta de satisfacción (CSAT)</h3>"
+                    f"<p><b>Calificación:</b> {calificacion}/5 {estrellas}</p>"
+                    f"<p><b>Cliente:</b> {session.nombre} ({phone})</p>"
+                    f"<p><b>Fecha:</b> {now_lima().strftime('%Y-%m-%d %H:%M')} (Lima)</p>",
+                    es_privado=False
+                )
             await wa_send_message(phone, f"¡Gracias por tu calificación! {'⭐' * calificacion}\n\nTu opinión nos ayuda a mejorar. ¡Hasta pronto! 👋")
             await clear_session(phone)
             return
@@ -1729,7 +1751,7 @@ async def subir_foto_drive(image_data: bytes, filename: str, ticket_id: str = No
             secure     = True
         )
 
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ts = now_lima().strftime("%Y%m%d_%H%M%S")
         uid = str(uuid.uuid4())[:8]
         ticket_str = ticket_id or "sin_ticket"
 
@@ -1878,7 +1900,7 @@ async def notificar_ticket_a_tecnico(
         cliente_nombre=cliente_nombre,
         cliente_direccion=cliente_direccion,
         problema=problema,
-        ts_asignado=datetime.now().isoformat(),
+        ts_asignado=now_lima().isoformat(),
     )
     await save_tecnico_session(sesion)
 
@@ -1961,7 +1983,7 @@ def calcular_ttr(ts_inicio: str, ts_fin: str) -> str:
 
 def construir_motivo_cierre(sesion: TecnicoSession) -> str:
     """Construye el texto completo para motivo_cierre de CloseTicket"""
-    ahora = datetime.now().isoformat()
+    ahora = now_lima().isoformat()
 
     def fmt(ts):
         if not ts:
@@ -1974,25 +1996,32 @@ def construir_motivo_cierre(sesion: TecnicoSession) -> str:
     ttr_total = calcular_ttr(sesion.ts_asignado, ahora) if sesion.ts_asignado else "N/D"
     ttr_sitio = calcular_ttr(sesion.ts_llegada, ahora) if sesion.ts_llegada else "N/D"
 
-    fotos_texto = "\n".join([f"  {i+1}. {url}" for i, url in enumerate(sesion.fotos)]) if sesion.fotos else "  Sin evidencias"
+    fotos_html = "".join([
+        f'<li><a href="{url}" target="_blank">Evidencia {i+1}</a></li>'
+        for i, url in enumerate(sesion.fotos)
+    ]) if sesion.fotos else "<li>Sin evidencias</li>"
 
     return (
-        f"=== REPORTE DE CIERRE — ARIA Bot ===\n\n"
-        f"TIMELINE\n"
-        f"  Ticket asignado:    {fmt(sesion.ts_asignado)}\n"
-        f"  Técnico confirmó:   {fmt(sesion.ts_confirmado)}\n"
-        f"  En camino:          {fmt(sesion.ts_en_camino)}\n"
-        f"  Llegada domicilio:  {fmt(sesion.ts_llegada)}\n"
-        f"  Cierre:             {fmt(ahora)}\n"
-        f"  TTR total:          {ttr_total}\n"
-        f"  Tiempo en sitio:    {ttr_sitio}\n\n"
-        f"DIAGNÓSTICO\n"
-        f"  Tipo de falla:      {sesion.falla or 'N/D'}\n"
-        f"  Solución aplicada:  {sesion.solucion or 'N/D'}\n"
-        f"  Materiales usados:  {sesion.materiales or 'Ninguno'}\n\n"
-        f"EVIDENCIAS\n{fotos_texto}\n\n"
-        f"Técnico: {sesion.nombre} ({sesion.phone})\n"
-        f"Cerrado por: ARIA Bot (automático)"
+        f"<h2>✅ Reporte de Cierre — ARIA Bot</h2>"
+        f"<h3>⏱ Timeline</h3>"
+        f"<table>"
+        f"<tr><td><b>Ticket asignado:</b></td><td>{fmt(sesion.ts_asignado)}</td></tr>"
+        f"<tr><td><b>Técnico confirmó:</b></td><td>{fmt(sesion.ts_confirmado)}</td></tr>"
+        f"<tr><td><b>En camino:</b></td><td>{fmt(sesion.ts_en_camino)}</td></tr>"
+        f"<tr><td><b>Llegada domicilio:</b></td><td>{fmt(sesion.ts_llegada)}</td></tr>"
+        f"<tr><td><b>Cierre:</b></td><td>{fmt(ahora)}</td></tr>"
+        f"<tr><td><b>TTR total:</b></td><td>{ttr_total}</td></tr>"
+        f"<tr><td><b>Tiempo en sitio:</b></td><td>{ttr_sitio}</td></tr>"
+        f"</table>"
+        f"<h3>🔧 Diagnóstico</h3>"
+        f"<table>"
+        f"<tr><td><b>Tipo de falla:</b></td><td>{sesion.falla or 'N/D'}</td></tr>"
+        f"<tr><td><b>Solución aplicada:</b></td><td>{sesion.solucion or 'N/D'}</td></tr>"
+        f"<tr><td><b>Materiales usados:</b></td><td>{sesion.materiales or 'Ninguno'}</td></tr>"
+        f"</table>"
+        f"<h3>📷 Evidencias</h3><ul>{fotos_html}</ul>"
+        f"<p><b>Técnico:</b> {sesion.nombre} ({sesion.phone})<br>"
+        f"<b>Cerrado por:</b> ARIA Bot (automático)</p>"
     )
 
 
@@ -2066,8 +2095,8 @@ async def procesar_mensaje_tecnico(phone: str, msg: dict, bg: BackgroundTasks):
 
         if texto and texto.startswith(f"tec_si_{ticket_id}"):
             sesion.fase = "EN_CAMINO"
-            sesion.ts_confirmado = datetime.now().isoformat()
-            sesion.ts_en_camino = datetime.now().isoformat()
+            sesion.ts_confirmado = now_lima().isoformat()
+            sesion.ts_en_camino = now_lima().isoformat()
             await save_tecnico_session(sesion)
 
             # GLPI: Cambiar estado a "En curso" + followup
@@ -2107,7 +2136,7 @@ async def procesar_mensaje_tecnico(phone: str, msg: dict, bg: BackgroundTasks):
 
         if texto and texto.startswith(f"tec_llegue_{ticket_id}"):
             sesion.fase = "EN_DOMICILIO"
-            sesion.ts_llegada = datetime.now().isoformat()
+            sesion.ts_llegada = now_lima().isoformat()
             await save_tecnico_session(sesion)
 
             # GLPI: followup de llegada
@@ -2239,7 +2268,7 @@ async def procesar_mensaje_tecnico(phone: str, msg: dict, bg: BackgroundTasks):
         # Cerrar con fotos
         if texto and texto.lower() in ("fin fotos", "fin", "listo", "ya", "eso es todo"):
             sesion.fase = "CERRANDO"
-            sesion.ts_cierre = datetime.now().isoformat()
+            sesion.ts_cierre = now_lima().isoformat()
             await save_tecnico_session(sesion)
 
             motivo = construir_motivo_cierre(sesion)
@@ -2305,7 +2334,7 @@ async def descargar_imagen_wa(media_id: str, tecnico_phone: str, es_video: bool 
             if r2.status_code != 200:
                 return None, None
 
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            ts = now_lima().strftime("%Y%m%d_%H%M%S")
             ext = "mp4" if es_video else "jpg"
             filename = f"{'video' if es_video else 'foto'}_{tecnico_phone}_{ts}.{ext}"
             return r2.content, filename
@@ -2446,7 +2475,7 @@ async def ticket_cerrado_por_tecnico(request: Request):
 async def health():
     return {
         "status": "online",
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": now_lima().isoformat(),
         "services": {
             "redis": "ok",
             "glm": "ok",
