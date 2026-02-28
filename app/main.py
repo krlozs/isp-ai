@@ -492,9 +492,9 @@ async def glpi_get_token() -> Optional[str]:
                 logger.info("[GLPI] Token renovado correctamente")
                 return _glpi_token_cache["token"]
             else:
-                logger.error(f"[GLPI] Error obteniendo token: {r.text}")
+                logger.error(f"[GLPI] Error obteniendo token HTTP {r.status_code}: {r.text}")
         except Exception as e:
-            logger.error(f"[GLPI] Error auth: {e}")
+            logger.error(f"[GLPI] Error auth tipo={type(e).__name__} detalle={repr(e)}")
     return None
 
 
