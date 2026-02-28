@@ -888,17 +888,33 @@ async def entregar_tickets_pendientes(numero_tecnico: str):
 
         logger.info(f"[PENDIENTE] Entregando {len(pendientes)} tickets pendientes a {numero_tecnico}")
 
-        await wa_send_message_tecnico(
-            numero_tecnico,
-            f"📬 Tienes *{len(pendientes)} ticket(s) pendiente(s)* que no pudieron entregarse antes:"
-        )
+        if len(pendientes) > 1:
+            await wa_send_message_tecnico(
+                numero_tecnico,
+                f"📬 Tienes *{len(pendientes)} ticket(s) pendiente(s)* que no pudieron entregarse antes:"
+            )
 
         for item in pendientes:
             ts = item.get("timestamp", "")[:16].replace("T", " ")
+            brief = item['mensaje']
+            # Obtener ticket_id desde la sesión activa del técnico
+            sesion = await get_tecnico_session(numero_tecnico)
+            ticket_id = sesion.ticket_id if sesion else None
+
             await wa_send_message_tecnico(
                 numero_tecnico,
-                f"🕐 _{ts}_\n{item['mensaje']}"
+                f"🕐 _{ts}_\n{brief}"
             )
+            # Enviar botones de confirmación si hay ticket_id
+            if ticket_id:
+                await wa_send_buttons_tecnico(
+                    numero_tecnico,
+                    "¿Puedes atender este ticket?",
+                    [
+                        {"id": f"tec_si_{ticket_id}", "title": "✅ Sí, voy"},
+                        {"id": f"tec_no_{ticket_id}", "title": "❌ No puedo"},
+                    ]
+                )
 
         await redis_client.delete(key)
         logger.info(f"[PENDIENTE] Entregados y limpiados para {numero_tecnico}")
@@ -1917,17 +1933,25 @@ async def notificar_ticket_a_tecnico(
     if datos_tecnicos:
         mensaje += f"\n📊 *Diagnóstico:*\n{datos_tecnicos}"
 
-    await wa_send_message_tecnico_con_fallback(tecnico_phone, mensaje)
+    # Verificar ventana
+    key_ventana = f"ventana_tecnico:{tecnico_phone}"
+    ventana_activa = await redis_client.get(key_ventana)
 
-    # Enviar botones de confirmación
-    await wa_send_buttons_tecnico(
-        tecnico_phone,
-        "¿Puedes atender este ticket?",
-        [
-            {"id": f"tec_si_{ticket_id}", "title": "✅ Sí, voy"},
-            {"id": f"tec_no_{ticket_id}", "title": "❌ No puedo"},
-        ]
-    )
+    if ventana_activa:
+        # Ventana activa → enviar brief + botones inmediatamente
+        await wa_send_message_tecnico(tecnico_phone, mensaje)
+        await wa_send_buttons_tecnico(
+            tecnico_phone,
+            "¿Puedes atender este ticket?",
+            [
+                {"id": f"tec_si_{ticket_id}", "title": "✅ Sí, voy"},
+                {"id": f"tec_no_{ticket_id}", "title": "❌ No puedo"},
+            ]
+        )
+    else:
+        # Sin ventana → guardar brief en pendientes (los botones se envían al entregar)
+        await guardar_ticket_pendiente(tecnico_phone, mensaje)
+        logger.warning(f"[WA_TECNICO] Ventana cerrada para {tecnico_phone} — guardado en Redis como pendiente")
 
 
 async def wa_send_buttons_tecnico(to: str, body: str, buttons: list):
