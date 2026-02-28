@@ -344,60 +344,219 @@ async def mw_get_facturas(cliente_id: str) -> dict:
 
 async def mw_crear_ticket(datos: dict) -> Optional[str]:
     """
-    Crea un ticket de soporte en MikroWisp usando /NewTicket.
+    Crea un ticket en GLPI via API v2.2.
     Retorna el ID del ticket creado.
+    Mantiene el nombre mw_crear_ticket para compatibilidad con el flujo existente.
     """
-    from datetime import date
-    headers = {"Content-Type": "application/json"}
-    payload = {
-        "token":       MIKROWISP_TOKEN,
-        "idcliente":   datos["cliente_id"],
-        "dp":          datos.get("dp", 1),
-        "asunto":      datos.get("asunto", "Ticket de soporte"),
-        "solicitante": datos.get("solicitante", "ARIA Bot"),
-        "fechavisita": datos.get("fechavisita", date.today().strftime("%Y-%m-%d")),
-        "turno":       datos.get("turno", "MAÑANA"),
-        "agendado":    datos.get("agendado", "VIA TELEFONICA"),
-        "contenido":   datos.get("descripcion", ""),
+    token = await glpi_get_token()
+    if not token:
+        return None
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
     }
+
+    # Mapear urgencia según problema
+    urgency_map = {
+        "kpi_no_internet": 4,         # Alto
+        "ont_offline_confirmado": 5,  # Muy alto
+        "ont_offline_sin_causa_aparente": 4,
+        "kpi_intermitente": 3,        # Medio
+    }
+    urgency = urgency_map.get(datos.get("kpi", ""), 3)
+
+    payload = {
+        "name":           datos.get("asunto", "Ticket de soporte"),
+        "content":        datos.get("descripcion", ""),
+        "status":         1,   # Nuevo
+        "type":           1,   # Incidencia
+        "urgency":        urgency,
+        "priority":       urgency,
+    }
+
+    # Agregar categoría si está disponible
+    if datos.get("categoria_id"):
+        payload["category"] = {"id": datos["categoria_id"]}
+
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             r = await client.post(
-                f"{MIKROWISP_BASE}/NewTicket",
+                f"{GLPI_API_URL}/Assistance/Ticket",
                 json=payload,
                 headers=headers
             )
-            logger.info(f"MikroWisp NewTicket status: {r.status_code} - {r.text}")
-            if r.status_code == 200:
+            logger.info(f"[GLPI] Crear ticket status: {r.status_code} - {r.text[:200]}")
+            if r.status_code in (200, 201):
                 data = r.json()
-                if data.get("estado") == "exito":
-                    return str(data.get("id") or data.get("ticket_id") or data.get("idticket", ""))
-                else:
-                    logger.error(f"MikroWisp NewTicket error: {data.get('mensaje')}")
+                ticket_id = str(data.get("id", ""))
+                if ticket_id:
+                    # Agregar followup con datos técnicos del cliente
+                    if datos.get("datos_tecnicos"):
+                        await glpi_agregar_followup(
+                            ticket_id,
+                            f"📊 Diagnóstico técnico ARIA:\n\n{datos['datos_tecnicos']}",
+                            token=token
+                        )
+                    return ticket_id
         except Exception as e:
-            logger.error(f"Error MikroWisp crear_ticket: {e}")
+            logger.error(f"[GLPI] Error crear ticket: {e}")
     return None
 
 
-async def mw_cerrar_ticket(ticket_id: str, motivo: str):
-    """Cierra un ticket en MikroWisp usando /CloseTicket"""
-    headers = {"Content-Type": "application/json"}
+async def mw_cerrar_ticket(ticket_id: str, motivo: str) -> bool:
+    """
+    Cierra un ticket en GLPI registrando la solución completa.
+    Mantiene el nombre mw_cerrar_ticket para compatibilidad.
+    """
+    token = await glpi_get_token()
+    if not token:
+        return False
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+
+    # Registrar solución
+    solution_payload = {
+        "content": motivo,
+        "status":  1,   # Aceptada
+    }
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            # Paso 1: Registrar solución
+            r = await client.post(
+                f"{GLPI_API_URL}/Assistance/Ticket/{ticket_id}/Timeline/Solution",
+                json=solution_payload,
+                headers=headers
+            )
+            logger.info(f"[GLPI] Solution status: {r.status_code} - {r.text[:200]}")
+
+            # Paso 2: Cerrar ticket (status=6 = Cerrado)
+            r2 = await client.patch(
+                f"{GLPI_API_URL}/Assistance/Ticket/{ticket_id}",
+                json={"status": 6},
+                headers=headers
+            )
+            logger.info(f"[GLPI] Close status: {r2.status_code} - {r2.text[:200]}")
+            return r2.status_code in (200, 201, 204)
+
+        except Exception as e:
+            logger.error(f"[GLPI] Error cerrar ticket: {e}")
+    return False
+
+
+# ─────────────────────────────────────────────
+# INTEGRACIÓN: GLPI API v2.2
+# ─────────────────────────────────────────────
+
+GLPI_API_URL = os.getenv("GLPI_API_URL", "https://ops.interlan.pe/api.php/v2.2")
+GLPI_CLIENT_ID = os.getenv("GLPI_CLIENT_ID")
+GLPI_CLIENT_SECRET = os.getenv("GLPI_CLIENT_SECRET")
+GLPI_USERNAME = os.getenv("GLPI_USERNAME", "aria-bot")
+GLPI_PASSWORD = os.getenv("GLPI_PASSWORD")
+
+# Cache del token en memoria (evita pedir token en cada request)
+_glpi_token_cache = {"token": None, "expires_at": 0}
+
+
+async def glpi_get_token() -> Optional[str]:
+    """Obtiene o renueva el token OAuth2 de GLPI."""
+    import time
+    now = time.time()
+
+    # Reutilizar token si aún es válido (con 60s de margen)
+    if _glpi_token_cache["token"] and now < _glpi_token_cache["expires_at"] - 60:
+        return _glpi_token_cache["token"]
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            r = await client.post(
+                f"{GLPI_API_URL}/token",
+                data={
+                    "grant_type":    "password",
+                    "client_id":     GLPI_CLIENT_ID,
+                    "client_secret": GLPI_CLIENT_SECRET,
+                    "username":      GLPI_USERNAME,
+                    "password":      GLPI_PASSWORD,
+                    "scope":         "api"
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"}
+            )
+            if r.status_code == 200:
+                data = r.json()
+                _glpi_token_cache["token"] = data["access_token"]
+                _glpi_token_cache["expires_at"] = now + data.get("expires_in", 3600)
+                logger.info("[GLPI] Token renovado correctamente")
+                return _glpi_token_cache["token"]
+            else:
+                logger.error(f"[GLPI] Error obteniendo token: {r.text}")
+        except Exception as e:
+            logger.error(f"[GLPI] Error auth: {e}")
+    return None
+
+
+async def glpi_agregar_followup(ticket_id: str, contenido: str, es_privado: bool = True, token: str = None) -> bool:
+    """Agrega un seguimiento/comentario a un ticket de GLPI."""
+    if not token:
+        token = await glpi_get_token()
+    if not token:
+        return False
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
     payload = {
-        "token":         MIKROWISP_TOKEN,
-        "idticket":      int(ticket_id),
-        "motivo_cierre": motivo,
+        "content":    contenido,
+        "is_private": 1 if es_privado else 0,
     }
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             r = await client.post(
-                f"{MIKROWISP_BASE}/CloseTicket",
+                f"{GLPI_API_URL}/Assistance/Ticket/{ticket_id}/Timeline/Followup",
                 json=payload,
                 headers=headers
             )
-            logger.info(f"MikroWisp CloseTicket status: {r.status_code} - {r.text}")
-            return r.status_code == 200
+            logger.info(f"[GLPI] Followup status: {r.status_code}")
+            return r.status_code in (200, 201)
         except Exception as e:
-            logger.error(f"Error MikroWisp cerrar_ticket: {e}")
+            logger.error(f"[GLPI] Error followup: {e}")
+    return False
+
+
+async def glpi_actualizar_estado(ticket_id: str, status: int, comentario: str = None) -> bool:
+    """
+    Actualiza el estado de un ticket en GLPI.
+    Status: 1=Nuevo, 2=En curso, 3=En espera, 4=Resuelto, 5=Cerrado (no usado), 6=Cerrado
+    """
+    token = await glpi_get_token()
+    if not token:
+        return False
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            r = await client.patch(
+                f"{GLPI_API_URL}/Assistance/Ticket/{ticket_id}",
+                json={"status": status},
+                headers=headers
+            )
+            logger.info(f"[GLPI] Update status {status}: {r.status_code}")
+
+            # Agregar followup con el comentario si se proporcionó
+            if comentario and r.status_code in (200, 201, 204):
+                await glpi_agregar_followup(ticket_id, comentario, token=token)
+
+            return r.status_code in (200, 201, 204)
+        except Exception as e:
+            logger.error(f"[GLPI] Error actualizar estado: {e}")
     return False
 
 
@@ -1911,6 +2070,13 @@ async def procesar_mensaje_tecnico(phone: str, msg: dict, bg: BackgroundTasks):
             sesion.ts_en_camino = datetime.now().isoformat()
             await save_tecnico_session(sesion)
 
+            # GLPI: Cambiar estado a "En curso" + followup
+            await glpi_actualizar_estado(
+                ticket_id, 2,
+                f"🚗 Técnico {sesion.nombre} confirmó asistencia y está en camino.\n"
+                f"Hora confirmación: {sesion.ts_confirmado}"
+            )
+
             await wa_send_message_tecnico(phone, f"✅ Confirmado. ¡Buen trabajo! Avísame cuando llegues al domicilio.")
             await wa_send_buttons_tecnico(
                 phone,
@@ -1943,6 +2109,14 @@ async def procesar_mensaje_tecnico(phone: str, msg: dict, bg: BackgroundTasks):
             sesion.fase = "EN_DOMICILIO"
             sesion.ts_llegada = datetime.now().isoformat()
             await save_tecnico_session(sesion)
+
+            # GLPI: followup de llegada
+            await glpi_agregar_followup(
+                ticket_id,
+                f"📍 Técnico {sesion.nombre} llegó al domicilio del cliente.\n"
+                f"Hora llegada: {sesion.ts_llegada}\n"
+                f"Dirección: {sesion.cliente_direccion or 'N/D'}"
+            )
 
             await wa_send_message_tecnico(
                 phone,
